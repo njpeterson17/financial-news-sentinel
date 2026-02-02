@@ -1,0 +1,411 @@
+# News Sentinel Bot Configuration
+
+# Scraping settings
+scraping:
+  # Delay between requests (seconds) - be respectful but faster
+  delay_min: 0.1
+  delay_max: 0.5
+
+  # Per-domain rate limiting settings (to avoid IP bans)
+  rate_limiting:
+    # Minimum seconds between requests to the same domain
+    per_domain_delay: 2.0
+
+  # Feed health tracking settings (dead feed detection)
+  feed_health:
+    # Number of consecutive failures before marking a feed as dead
+    max_consecutive_failures: 5
+    # Base backoff time in minutes (doubles with each subsequent failure)
+    base_backoff_minutes: 15
+
+  # HTTP caching settings
+  caching:
+    enabled: true
+    cache_file: "data/http_cache.json"
+    # Log cache statistics (hits/misses)
+    log_stats: true
+    # Maximum age of cache entries in days (older entries are cleaned up)
+    max_age_days: 7
+
+  # User agent rotation
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  
+  # Request timeout
+  timeout: 30
+  
+  # Max retries
+  max_retries: 3
+
+# News sources - EXTENSIVE LIST
+sources:
+  # === TIER 1: Major Financial News ===
+  
+  reuters:
+    enabled: true
+    name: "Reuters"
+    rss_feeds:
+      - "https://www.reutersagency.com/feed/?taxonomy=markets&post_type=reuters-best"
+      - "https://www.reutersagency.com/feed/?taxonomy=business-finance&post_type=reuters-best"
+      - "https://www.reutersagency.com/feed/?taxonomy=tech&post_type=reuters-best"
+      - "https://www.reutersagency.com/feed/?taxonomy=commodities&post_type=reuters-best"
+
+  bloomberg:
+    enabled: true
+    name: "Bloomberg"
+    rss_feeds:
+      - "https://feeds.bloomberg.com/business/news.rss"
+      - "https://feeds.bloomberg.com/markets/news.rss"
+      - "https://feeds.bloomberg.com/technology/news.rss"
+      - "https://feeds.bloomberg.com/politics/news.rss"
+      - "https://feeds.bloomberg.com/wealth/news.rss"
+
+  cnbc:
+    enabled: true
+    name: "CNBC"
+    rss_feeds:
+      - "https://www.cnbc.com/id/100003114/device/rss/rss.html"  # Top News
+      - "https://www.cnbc.com/id/10000664/device/rss/rss.html"   # Markets
+      - "https://www.cnbc.com/id/10001147/device/rss/rss.html"   # Investing
+      - "https://www.cnbc.com/id/19854910/device/rss/rss.html"   # Tech
+      - "https://www.cnbc.com/id/10001054/device/rss/rss.html"   # Earnings
+
+  wsj:
+    enabled: true
+    name: "Wall Street Journal"
+    rss_feeds:
+      - "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"
+      - "https://feeds.a.dj.com/rss/RSSWSJD.xml"
+      - "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"
+
+  ft:
+    enabled: true
+    name: "Financial Times"
+    rss_feeds:
+      - "https://www.ft.com/rss/home/us"
+      - "https://www.ft.com/rss/markets"
+      - "https://www.ft.com/rss/companies"
+      - "https://www.ft.com/rss/technology"
+
+  marketwatch:
+    enabled: true
+    name: "MarketWatch"
+    rss_feeds:
+      - "https://www.marketwatch.com/rss/topstories"
+      - "https://www.marketwatch.com/rss/markets"
+      - "https://www.marketwatch.com/rss/investing"
+      - "https://www.marketwatch.com/rss/personal-finance"
+
+  seekingalpha:
+    enabled: true
+    name: "Seeking Alpha"
+    rss_feeds:
+      - "https://seekingalpha.com/feed.xml"
+      - "https://seekingalpha.com/market_outlook/feed.xml"
+      - "https://seekingalpha.com/news/feed.xml"
+
+  investingcom:
+    enabled: true
+    name: "Investing.com"
+    rss_feeds:
+      - "https://www.investing.com/rss/news.rss"
+      - "https://www.investing.com/rss/stock.rss"
+      - "https://www.investing.com/rss/forex.rss"
+
+  zacks:
+    enabled: true
+    name: "Zacks"
+    rss_feeds:
+      - "https://www.zacks.com/rss/market/news.php"
+      - "https://www.zacks.com/rss/commentary/headlines.php"
+
+  # === TIER 2: Business & Tech News ===
+
+  techcrunch:
+    enabled: true
+    name: "TechCrunch"
+    rss_feeds:
+      - "https://techcrunch.com/feed/"
+
+  theverge:
+    enabled: true
+    name: "The Verge"
+    rss_feeds:
+      - "https://www.theverge.com/rss/index.xml"
+
+  arstechnica:
+    enabled: true
+    name: "Ars Technica"
+    rss_feeds:
+      - "https://feeds.arstechnica.com/arstechnica/index"
+      - "https://feeds.arstechnica.com/arstechnica/business"
+
+  wired:
+    enabled: true
+    name: "Wired"
+    rss_feeds:
+      - "https://www.wired.com/feed/rss"
+      - "https://www.wired.com/feed/category/business/latest/rss"
+
+  businessinsider:
+    enabled: true
+    name: "Business Insider"
+    rss_feeds:
+      - "https://www.businessinsider.com/rss"
+      - "https://markets.businessinsider.com/rss/news"
+
+  forbes:
+    enabled: true
+    name: "Forbes"
+    rss_feeds:
+      - "https://www.forbes.com/business/feed/"
+      - "https://www.forbes.com/money/feed/"
+      - "https://www.forbes.com/technology/feed/"
+
+  fortune:
+    enabled: true
+    name: "Fortune"
+    rss_feeds:
+      - "https://fortune.com/feed/"
+      - "https://fortune.com/finance/feed/"
+      - "https://fortune.com/tech/feed/"
+
+  fastcompany:
+    enabled: true
+    name: "Fast Company"
+    rss_feeds:
+      - "https://www.fastcompany.com/latest/rss"
+
+  # === TIER 3: General News with Business ===
+
+  bbc_business:
+    enabled: true
+    name: "BBC Business"
+    rss_feeds:
+      - "https://feeds.bbci.co.uk/news/business/rss.xml"
+      - "https://feeds.bbci.co.uk/news/technology/rss.xml"
+
+  guardian_business:
+    enabled: true
+    name: "Guardian Business"
+    rss_feeds:
+      - "https://www.theguardian.com/us-business/rss"
+      - "https://www.theguardian.com/technology/rss"
+      - "https://www.theguardian.com/business/stock-markets/rss"
+
+  nytimes_business:
+    enabled: true
+    name: "NY Times Business"
+    rss_feeds:
+      - "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml"
+      - "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml"
+      - "https://rss.nytimes.com/services/xml/rss/nyt/YourMoney.xml"
+
+  ap_news:
+    enabled: true
+    name: "AP News"
+    rss_feeds:
+      - "https://rsshub.app/apnews/topics/ap-business"
+      - "https://rsshub.app/apnews/topics/ap-technology"
+
+  # === TIER 4: Financial Data & Analysis ===
+
+  yahoo_finance:
+    enabled: true
+    name: "Yahoo Finance"
+    rss_feeds:
+      - "https://finance.yahoo.com/news/rssindex"
+      - "https://finance.yahoo.com/rss/topstories"
+
+  morningbrew:
+    enabled: true
+    name: "Morning Brew"
+    rss_feeds:
+      - "https://morningbrew.com/daily/rss"
+
+  finviz:
+    enabled: true
+    name: "Finviz"
+    rss_feeds:
+      - "https://rss.finviz.com/news.ashx"
+
+  # === TIER 5: Crypto & Alternative ===
+  
+  coindesk:
+    enabled: true
+    name: "CoinDesk"
+    rss_feeds:
+      - "https://www.coindesk.com/arc/outboundfeeds/rss/"
+
+  cointelegraph:
+    enabled: true
+    name: "CoinTelegraph"
+    rss_feeds:
+      - "https://cointelegraph.com/rss"
+
+# Pattern detection
+patterns:
+  # Volume spike threshold (articles in 24h vs 7-day average)
+  volume_spike_threshold: 3.0
+  
+  # Minimum articles to trigger alert
+  min_articles_for_alert: 3
+  
+  # Time windows (hours)
+  windows:
+    short: 6      # 6 hours
+    medium: 24    # 24 hours
+    long: 168     # 7 days
+  
+  # Sentiment analysis keywords
+  sentiment_keywords:
+    positive:
+      - "surge"
+      - "rally"
+      - "breakthrough"
+      - "beat expectations"
+      - "record high"
+      - "soar"
+      - "boom"
+      - "outperform"
+      - "strong"
+      - "growth"
+      - "profit"
+      - "gain"
+      - "upgraded"
+      - "bullish"
+      - "moon"
+    negative:
+      - "crash"
+      - "plunge"
+      - "investigation"
+      - "lawsuit"
+      - "miss expectations"
+      - "bankruptcy"
+      - "layoffs"
+      - "underperform"
+      - "scandal"
+      - "fraud"
+      - "loss"
+      - "decline"
+      - "downgraded"
+      - "bearish"
+      - "selloff"
+
+# Company tracking
+companies:
+  # Predefined watchlist (ticker: name patterns)
+  watchlist:
+    # Mega Cap Tech
+    AAPL: ["Apple", "AAPL"]
+    MSFT: ["Microsoft", "MSFT"]
+    GOOGL: ["Google", "Alphabet", "GOOGL", "GOOG"]
+    AMZN: ["Amazon", "AMZN"]
+    META: ["Meta", "Facebook", "META", "FB"]
+    TSLA: ["Tesla", "TSLA", "Elon Musk"]
+    NVDA: ["Nvidia", "NVDA"]
+    
+    # Other Tech
+    NFLX: ["Netflix", "NFLX"]
+    AMD: ["AMD", "Advanced Micro Devices"]
+    INTC: ["Intel", "INTC"]
+    CRM: ["Salesforce", "CRM"]
+    ADBE: ["Adobe", "ADBE"]
+    ORCL: ["Oracle", "ORCL"]
+    IBM: ["IBM", "International Business Machines"]
+    
+    # Finance
+    JPM: ["JPMorgan", "JPM", "JPMorgan Chase"]
+    BAC: ["Bank of America", "BAC"]
+    WFC: ["Wells Fargo", "WFC"]
+    GS: ["Goldman Sachs", "GS"]
+    MS: ["Morgan Stanley", "MS"]
+    C: ["Citigroup", "C", "Citi"]
+    V: ["Visa", "V"]
+    MA: ["Mastercard", "MA"]
+    
+    # Healthcare
+    JNJ: ["Johnson & Johnson", "JNJ"]
+    UNH: ["UnitedHealth", "UNH"]
+    PFE: ["Pfizer", "PFE"]
+    ABBV: ["AbbVie", "ABBV"]
+    MRK: ["Merck", "MRK"]
+    
+    # Energy
+    XOM: ["Exxon", "ExxonMobil", "XOM"]
+    CVX: ["Chevron", "CVX"]
+    
+    # Consumer
+    WMT: ["Walmart", "WMT"]
+    HD: ["Home Depot", "HD"]
+    PG: ["Procter & Gamble", "PG"]
+    KO: ["Coca-Cola", "KO", "Coke"]
+    MCD: ["McDonald's", "MCD"]
+    NKE: ["Nike", "NKE"]
+    DIS: ["Disney", "DIS", "Walt Disney"]
+    
+    # Industrial
+    BA: ["Boeing", "BA"]
+    CAT: ["Caterpillar", "CAT"]
+    GE: ["GE", "General Electric"]
+    
+    # Telecom
+    VZ: ["Verizon", "VZ"]
+    T: ["AT&T", "T"]
+    
+    # Crypto-related stocks
+    COIN: ["Coinbase", "COIN"]
+    MSTR: ["MicroStrategy", "MSTR"]
+    
+    # Add more as needed
+  
+  # Auto-detect new companies mentioned frequently
+  auto_detect: true
+  auto_detect_threshold: 5  # mentions in 24h
+
+# Alerts
+alerts:
+  # Console output
+  console: true
+
+  # File log
+  file:
+    enabled: true
+    path: "logs/alerts.log"
+
+  # Telegram (optional)
+  # SECURITY: Set credentials via environment variables, NOT in this file
+  # Required env vars: NEWS_BOT_TELEGRAM_TOKEN, NEWS_BOT_TELEGRAM_CHAT_ID
+  telegram:
+    enabled: false
+    # Values below are fallbacks if env vars are not set (leave empty for security)
+    bot_token: "${NEWS_BOT_TELEGRAM_TOKEN}"
+    chat_id: "${NEWS_BOT_TELEGRAM_CHAT_ID}"
+
+  # Webhook (for integration with other systems)
+  # SECURITY: Set URL via environment variable NEWS_BOT_WEBHOOK_URL
+  webhook:
+    enabled: false
+    url: "${NEWS_BOT_WEBHOOK_URL}"
+
+# API Security
+# SECURITY: Set API key via environment variable NEWS_SENTINEL_API_KEY
+# If not set, API endpoints will be accessible without authentication (backwards compatible)
+api:
+  require_auth: true  # Set to false to disable API authentication
+  # API key is read from NEWS_SENTINEL_API_KEY environment variable
+
+# Database
+database:
+  path: "data/news_sentinel.db"
+  retention_days: 30  # Keep articles for 30 days
+
+# Scheduling
+schedule:
+  # Run every X minutes
+  interval_minutes: 15  # More frequent with more sources
+  
+  # Or use specific times (cron format)
+  # cron: "0 */2 * * *"  # Every 2 hours

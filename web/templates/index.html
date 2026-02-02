@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>News Sentinel Bot - Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <i class="fas fa-radar"></i>
+                <h1>News Sentinel</h1>
+            </div>
+            <div class="header-actions">
+                <button id="refreshBtn" class="btn btn-primary">
+                    <i class="fas fa-sync-alt"></i> Refresh
+                </button>
+                <button id="runBotBtn" class="btn btn-success">
+                    <i class="fas fa-play"></i> Run Now
+                </button>
+            </div>
+        </header>
+
+        <!-- Stats Cards -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon articles">
+                    <i class="fas fa-newspaper"></i>
+                </div>
+                <div class="stat-info">
+                    <span class="stat-value" id="totalArticles">-</span>
+                    <span class="stat-label">Total Articles</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon mentions">
+                    <i class="fas fa-building"></i>
+                </div>
+                <div class="stat-info">
+                    <span class="stat-value" id="totalMentions">-</span>
+                    <span class="stat-label">Company Mentions</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon alerts">
+                    <i class="fas fa-bell"></i>
+                </div>
+                <div class="stat-info">
+                    <span class="stat-value" id="totalAlerts">-</span>
+                    <span class="stat-label">Active Alerts</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon recent">
+                    <i class="fas fa-clock"></i>
+                </div>
+                <div class="stat-info">
+                    <span class="stat-value" id="articles24h">-</span>
+                    <span class="stat-label">Articles (24h)</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Content Grid -->
+        <div class="main-grid">
+            <!-- Alerts Section -->
+            <div class="panel alerts-panel">
+                <div class="panel-header">
+                    <h2><i class="fas fa-exclamation-triangle"></i> Active Alerts</h2>
+                    <span class="badge" id="alertCount">0</span>
+                </div>
+                <div class="panel-body">
+                    <div id="alertsList" class="alerts-list">
+                        <div class="loading">Loading alerts...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts Section -->
+            <div class="panel charts-panel">
+                <div class="panel-header">
+                    <h2><i class="fas fa-chart-line"></i> Activity</h2>
+                    <div class="chart-tabs">
+                        <button class="tab-btn active" data-chart="mentions">Mentions</button>
+                        <button class="tab-btn" data-chart="sentiment">Sentiment</button>
+                        <button class="tab-btn" data-chart="sources">Sources</button>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <div class="chart-container">
+                        <canvas id="mainChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Secondary Grid -->
+        <div class="secondary-grid">
+            <!-- Top Companies -->
+            <div class="panel">
+                <div class="panel-header">
+                    <h2><i class="fas fa-trophy"></i> Top Mentioned (24h)</h2>
+                </div>
+                <div class="panel-body">
+                    <div id="topCompanies" class="companies-list">
+                        <div class="loading">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sentiment Overview -->
+            <div class="panel">
+                <div class="panel-header">
+                    <h2><i class="fas fa-smile"></i> Sentiment (24h)</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="sentiment-chart-container">
+                        <canvas id="sentimentChart"></canvas>
+                    </div>
+                    <div id="sentimentStats" class="sentiment-stats"></div>
+                </div>
+            </div>
+
+            <!-- Recent Articles -->
+            <div class="panel articles-panel">
+                <div class="panel-header">
+                    <h2><i class="fas fa-list"></i> Recent Articles</h2>
+                    <select id="articleFilter" class="filter-select">
+                        <option value="all">All Sources</option>
+                    </select>
+                </div>
+                <div class="panel-body">
+                    <div id="articlesList" class="articles-list">
+                        <div class="loading">Loading articles...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Status Bar -->
+        <div class="status-bar">
+            <span id="lastUpdated">Last updated: Never</span>
+            <span id="statusIndicator" class="status">
+                <i class="fas fa-circle"></i> Ready
+            </span>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
