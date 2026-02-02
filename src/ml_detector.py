@@ -6,7 +6,6 @@ pattern detection with anomaly detection and trend classification.
 """
 
 import logging
-import pickle
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -17,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Try to import sklearn, but allow graceful fallback
 try:
+    import joblib
     from sklearn.ensemble import IsolationForest, RandomForestClassifier
     from sklearn.preprocessing import StandardScaler
 
@@ -49,13 +49,13 @@ class MLPatternDetector:
         self.anomaly_threshold = self.ml_config.get("anomaly_threshold", 0.7)
 
         # Models
-        self.anomaly_detector: Optional[Any] = None
-        self.trend_classifier: Optional[Any] = None
-        self.scaler: Optional[Any] = None
+        self.anomaly_detector: Any | None = None
+        self.trend_classifier: Any | None = None
+        self.scaler: Any | None = None
 
         # Training state
         self.is_trained = False
-        self.last_training_time: Optional[datetime] = None
+        self.last_training_time: datetime | None = None
         self.training_sample_count = 0
 
         if self.enabled:
@@ -378,7 +378,7 @@ class MLPatternDetector:
             "training_samples": self.training_sample_count,
         }
 
-    def save_model(self, path: Optional[str] = None) -> bool:
+    def save_model(self, path: str | None = None) -> bool:
         """
         Save trained models to disk.
 
@@ -406,8 +406,7 @@ class MLPatternDetector:
                 "config": self.ml_config,
             }
 
-            with open(save_path, "wb") as f:
-                pickle.dump(model_data, f)
+            joblib.dump(model_data, save_path)
 
             logger.info("ML models saved", extra={"path": str(save_path)})
             return True
@@ -416,7 +415,7 @@ class MLPatternDetector:
             logger.error("Failed to save ML models", extra={"error": str(e)})
             return False
 
-    def load_model(self, path: Optional[str] = None) -> bool:
+    def load_model(self, path: str | None = None) -> bool:
         """
         Load trained models from disk.
 
@@ -437,8 +436,7 @@ class MLPatternDetector:
             return False
 
         try:
-            with open(load_path, "rb") as f:
-                model_data = pickle.load(f)
+            model_data = joblib.load(load_path)
 
             self.anomaly_detector = model_data["anomaly_detector"]
             self.trend_classifier = model_data["trend_classifier"]

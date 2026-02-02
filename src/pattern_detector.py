@@ -42,8 +42,8 @@ class PatternAlert:
     severity: str  # 'low', 'medium', 'high'
     message: str
     details: dict[str, Any]
-    ml_score: Optional[float] = None  # ML confidence score when ML detection is used
-    market_context: Optional[Dict[str, Any]] = None  # Stock price context when available
+    ml_score: float | None = None  # ML confidence score when ML detection is used
+    market_context: dict[str, Any] | None = None  # Stock price context when available
 
     def to_dict(self) -> dict[str, Any]:
         result = {
@@ -83,7 +83,7 @@ class PatternDetector:
         )
 
         # ML detection (optional)
-        self.ml_detector: Optional[Any] = None
+        self.ml_detector: Any | None = None
         self.ml_enabled = False
         ml_config = config.get("ml_detection", {})
         if ml_config.get("enabled", False) and MLPatternDetector is not None:
@@ -103,7 +103,7 @@ class PatternDetector:
                 self.ml_enabled = False
 
         # Market data provider (optional)
-        self.market_data: Optional[Any] = None
+        self.market_data: Any | None = None
         self.market_data_enabled = False
         market_config = config.get("market_data", {})
         if market_config.get("enabled", False) and MarketDataProvider is not None:
@@ -237,7 +237,7 @@ class PatternDetector:
         }
 
     def _apply_ml_score(
-        self, alert: PatternAlert, ml_result: Optional[dict[str, Any]]
+        self, alert: PatternAlert, ml_result: dict[str, Any] | None
     ) -> PatternAlert:
         """Apply ML score to an alert, potentially adjusting confidence."""
         if not ml_result or "ml_score" not in ml_result:
@@ -263,7 +263,7 @@ class PatternDetector:
 
     def _check_ml_only_anomaly(
         self, ticker: str, company_name: str, ml_result: dict[str, Any]
-    ) -> Optional[PatternAlert]:
+    ) -> PatternAlert | None:
         """Check if ML detected an anomaly that rule-based detection missed."""
         if not ml_result:
             return None
@@ -564,7 +564,7 @@ class PatternDetector:
 
             return [dict(row) for row in rows]
 
-    def _get_market_context(self, ticker: str) -> Optional[Dict[str, Any]]:
+    def _get_market_context(self, ticker: str) -> dict[str, Any] | None:
         """
         Get market context for a ticker.
 
@@ -581,7 +581,7 @@ class PatternDetector:
             return None
 
     def _apply_market_context(
-        self, alert: PatternAlert, market_context: Optional[Dict[str, Any]]
+        self, alert: PatternAlert, market_context: dict[str, Any] | None
     ) -> PatternAlert:
         """
         Apply market context to an alert, enriching the message and details.

@@ -35,8 +35,8 @@ class AggregatedAlert:
         self.ticker = ticker
         self.company_name = company_name
         self.alerts: list[PatternAlert] = []
-        self.first_alert_time: Optional[datetime] = None
-        self.last_alert_time: Optional[datetime] = None
+        self.first_alert_time: datetime | None = None
+        self.last_alert_time: datetime | None = None
 
     def add_alert(self, alert: PatternAlert) -> None:
         """Add an alert to this aggregated group"""
@@ -123,7 +123,7 @@ class AlertAggregator:
         # Track when each group was started
         self._group_start_times: dict[str, datetime] = {}
 
-    def add_alert(self, alert: PatternAlert) -> Optional[list[PatternAlert]]:
+    def add_alert(self, alert: PatternAlert) -> list[PatternAlert] | None:
         """
         Add an alert to the aggregator.
 

@@ -25,12 +25,12 @@ class AlertImpact:
     ticker: str
     alert_type: str
     alert_time: datetime
-    price_at_alert: Optional[float]
-    price_after: Optional[float]
+    price_at_alert: float | None
+    price_after: float | None
     hours_measured: int
-    price_change_pct: Optional[float]
+    price_change_pct: float | None
     preceded_significant_move: bool
-    move_direction: Optional[str]  # 'up', 'down', or None
+    move_direction: str | None  # 'up', 'down', or None
 
 
 @dataclass
@@ -41,9 +41,9 @@ class CorrelationStats:
     total_alerts: int
     alerts_with_data: int
     significant_moves_preceded: int
-    average_price_change: Optional[float]
+    average_price_change: float | None
     hit_rate: float  # Percentage of alerts preceding significant moves
-    by_alert_type: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    by_alert_type: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class CorrelationAnalyzer:
@@ -55,7 +55,7 @@ class CorrelationAnalyzer:
     """
 
     def __init__(
-        self, db: Database, market_data: MarketDataProvider, config: Optional[Dict[str, Any]] = None
+        self, db: Database, market_data: MarketDataProvider, config: dict[str, Any] | None = None
     ):
         """
         Initialize the correlation analyzer.
@@ -70,7 +70,7 @@ class CorrelationAnalyzer:
         self.config = config or {}
         self.significant_move_threshold = self.config.get("significant_move_threshold", 2.0)
 
-    def analyze_alert_impact(self, alert: Alert, hours_after: int = 24) -> Optional[AlertImpact]:
+    def analyze_alert_impact(self, alert: Alert, hours_after: int = 24) -> AlertImpact | None:
         """
         Analyze the price impact following a specific alert.
 
@@ -131,7 +131,7 @@ class CorrelationAnalyzer:
             logger.warning(f"Failed to analyze alert impact: {e}")
             return None
 
-    def calculate_correlation(self, ticker: str, days: int = 30) -> Optional[CorrelationStats]:
+    def calculate_correlation(self, ticker: str, days: int = 30) -> CorrelationStats | None:
         """
         Calculate correlation between alert volume and price volatility.
 
@@ -158,7 +158,7 @@ class CorrelationAnalyzer:
                 )
 
             # Analyze each alert
-            impacts: List[AlertImpact] = []
+            impacts: list[AlertImpact] = []
             for alert in alerts:
                 impact = self.analyze_alert_impact(alert)
                 if impact:
@@ -177,7 +177,7 @@ class CorrelationAnalyzer:
             hit_rate = (significant / with_data * 100) if with_data > 0 else 0.0
 
             # Break down by alert type
-            by_type: Dict[str, Dict[str, Any]] = defaultdict(
+            by_type: dict[str, dict[str, Any]] = defaultdict(
                 lambda: {"count": 0, "significant_moves": 0, "avg_change": 0.0, "changes": []}
             )
 
@@ -211,10 +211,10 @@ class CorrelationAnalyzer:
 
     def score_alert_accuracy(
         self,
-        alerts: Optional[List[Alert]] = None,
+        alerts: list[Alert] | None = None,
         lookback_days: int = 30,
-        ticker: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        ticker: str | None = None,
+    ) -> dict[str, Any]:
         """
         Score how predictive alerts have been overall.
 
@@ -243,7 +243,7 @@ class CorrelationAnalyzer:
                 }
 
             # Group by type and analyze
-            by_type: Dict[str, Dict[str, Any]] = defaultdict(
+            by_type: dict[str, dict[str, Any]] = defaultdict(
                 lambda: {
                     "total": 0,
                     "with_data": 0,
@@ -254,7 +254,7 @@ class CorrelationAnalyzer:
                 }
             )
 
-            all_impacts: List[AlertImpact] = []
+            all_impacts: list[AlertImpact] = []
 
             for alert in alerts:
                 impact = self.analyze_alert_impact(alert)
@@ -346,7 +346,7 @@ class CorrelationAnalyzer:
         # For other types, any significant move is considered a match
         return True
 
-    def _get_ticker_alerts(self, ticker: str, since: datetime) -> List[Alert]:
+    def _get_ticker_alerts(self, ticker: str, since: datetime) -> list[Alert]:
         """Get alerts for a specific ticker since a date."""
         try:
             with self.db.get_connection() as conn:
@@ -379,7 +379,7 @@ class CorrelationAnalyzer:
             logger.warning(f"Failed to get alerts for {ticker}: {e}")
             return []
 
-    def _get_all_alerts(self, since: datetime) -> List[Alert]:
+    def _get_all_alerts(self, since: datetime) -> list[Alert]:
         """Get all alerts since a date."""
         try:
             with self.db.get_connection() as conn:
@@ -412,7 +412,7 @@ class CorrelationAnalyzer:
             logger.warning(f"Failed to get all alerts: {e}")
             return []
 
-    def get_correlation_report(self, ticker: str, days: int = 30) -> Dict[str, Any]:
+    def get_correlation_report(self, ticker: str, days: int = 30) -> dict[str, Any]:
         """
         Generate a comprehensive correlation report for a ticker.
 

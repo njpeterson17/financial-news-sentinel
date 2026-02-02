@@ -30,8 +30,8 @@ class PriceData:
     ticker: str
     price: float
     timestamp: datetime
-    change_pct: Optional[float] = None
-    volume: Optional[int] = None
+    change_pct: float | None = None
+    volume: int | None = None
 
 
 @dataclass
@@ -51,7 +51,7 @@ class MarketDataProvider:
     core functionality.
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: dict[str, Any] | None = None):
         """
         Initialize the market data provider.
 
@@ -65,12 +65,12 @@ class MarketDataProvider:
         self.cache_ttl_seconds = self.config.get("cache_ttl_minutes", 15) * 60
 
         # Simple in-memory cache: key -> CacheEntry
-        self._cache: Dict[str, CacheEntry] = {}
+        self._cache: dict[str, CacheEntry] = {}
 
         if not YFINANCE_AVAILABLE:
             logger.warning("MarketDataProvider initialized but yfinance not available")
 
-    def _get_cached(self, key: str) -> Optional[Any]:
+    def _get_cached(self, key: str) -> Any | None:
         """Get value from cache if not expired."""
         if key in self._cache:
             entry = self._cache[key]
@@ -96,7 +96,7 @@ class MarketDataProvider:
         for key in expired:
             del self._cache[key]
 
-    def get_price(self, ticker: str, date: Optional[datetime] = None) -> Optional[float]:
+    def get_price(self, ticker: str, date: datetime | None = None) -> float | None:
         """
         Get closing price for a ticker on a specific date.
 
@@ -147,8 +147,8 @@ class MarketDataProvider:
             return None
 
     def get_price_change(
-        self, ticker: str, start: datetime, end: Optional[datetime] = None
-    ) -> Optional[float]:
+        self, ticker: str, start: datetime, end: datetime | None = None
+    ) -> float | None:
         """
         Calculate percentage price change over a period.
 
@@ -189,7 +189,7 @@ class MarketDataProvider:
             logger.warning(f"Failed to get price change for {ticker}: {e}")
             return None
 
-    def get_intraday_change(self, ticker: str) -> Optional[float]:
+    def get_intraday_change(self, ticker: str) -> float | None:
         """
         Get today's price change so far.
 
@@ -243,7 +243,7 @@ class MarketDataProvider:
             logger.warning(f"Failed to get intraday change for {ticker}: {e}")
             return None
 
-    def get_historical_prices(self, ticker: str, days: int = 30) -> Optional[Dict[str, float]]:
+    def get_historical_prices(self, ticker: str, days: int = 30) -> dict[str, float] | None:
         """
         Get price history for a ticker.
 
@@ -285,7 +285,7 @@ class MarketDataProvider:
             logger.warning(f"Failed to get historical prices for {ticker}: {e}")
             return None
 
-    def get_market_context(self, ticker: str) -> Optional[Dict[str, Any]]:
+    def get_market_context(self, ticker: str) -> dict[str, Any] | None:
         """
         Get comprehensive market context for a ticker.
 
@@ -326,7 +326,7 @@ class MarketDataProvider:
 
     def is_significant_move(
         self, ticker: str, threshold_pct: float = 2.0, days: int = 1
-    ) -> Optional[bool]:
+    ) -> bool | None:
         """
         Check if ticker has made a significant price move.
 
