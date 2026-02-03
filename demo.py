@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Quick demo of News Sentinel Bot pattern detection
+Quick demo of Nickberg Terminal pattern detection
 """
 
 import sys
@@ -68,7 +68,7 @@ DEMO_ARTICLES = [
 
 def main():
     print("=" * 60)
-    print("📰 News Sentinel Bot - Demo")
+    print("📰 Nickberg Terminal - Demo")
     print("=" * 60)
 
     # Initialize extractor

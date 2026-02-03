@@ -1,5 +1,5 @@
 """
-Structured JSON logging configuration for News Sentinel Bot.
+Structured JSON logging configuration for Nickberg Terminal.
 
 Supports both JSON (for production) and human-readable (for development) formats.
 Configure via environment variables:

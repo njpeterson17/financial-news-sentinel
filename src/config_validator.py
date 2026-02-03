@@ -1,5 +1,5 @@
 """
-Configuration validation for News Sentinel Bot.
+Configuration validation for Nickberg Terminal.
 
 Validates config/settings.yaml on startup with clear, actionable error messages.
 """

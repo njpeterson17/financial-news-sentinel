@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Nickberg Terminal</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔮</text></svg>">
+    <link rel="stylesheet" href="/static/css/bloomberg-theme.css?v=999">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        /* Force ticker visibility - debug styles */
+        .news-ticker-container {
+            display: flex !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            z-index: 9999 !important;
+        }
+        /* Hide any lingering chart elements */
+        #sentimentChart, .chart-container, .mini-chart, canvas {
+            display: none !important;
+            visibility: hidden !important;
+        }
+    </style>
+    <script>
+        // Clear any service workers and force reload if needed
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                for(let registration of registrations) {
+                    registration.unregister();
+                }
+            });
+        }
+    </script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <i class="fas fa-radar"></i>
+                <h1>NICKBERG TERMINAL</h1>
+            </div>
+            <div class="keyboard-hint" onclick="toggleHelpOverlay()">
+                <i class="fas fa-keyboard"></i>
+                <span>Press <kbd>?</kbd> for shortcuts</span>
+            </div>
+            <div class="header-actions">
+                <button id="refreshBtn" class="btn">
+                    <i class="fas fa-sync-alt"></i> REFRESH
+                </button>
+                <button id="runBotBtn" class="btn">
+                    <i class="fas fa-play"></i> RUN NOW
+                </button>
+            </div>
+        </header>
+
+        <!-- Bloomberg-style Command Line -->
+        <div class="command-bar">
+            <span class="command-prompt">&gt;</span>
+            <input type="text" id="commandInput" class="command-input" placeholder="Enter ticker (e.g., AAPL) or function..." autocomplete="off">
+            <button class="command-btn" onclick="executeCommand()">
+                <i class="fas fa-arrow-right"></i>
+            </button>
+            <div class="command-help">
+                <kbd>ENTER</kbd> to search | <kbd>ESC</kbd> to close
+            </div>
+        </div>
+
+        <!-- Stock Details Panel (hidden by default) -->
+        <div id="stockDetailsPanel" class="stock-details-panel" style="display: none;">
+            <div class="stock-details-header">
+                <div class="stock-main-info">
+                    <span class="stock-detail-symbol" id="detailSymbol">AAPL</span>
+                    <span class="stock-detail-name" id="detailName">Apple Inc.</span>
+                </div>
+                <div class="stock-main-price">
+                    <span class="stock-detail-price" id="detailPrice">$150.25</span>
+                    <span class="stock-detail-change" id="detailChange">▲ +2.50 (+1.69%)</span>
+                </div>
+                <button class="stock-details-close" onclick="closeStockDetails()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="stock-details-grid">
+                <div class="stock-stat">
+                    <span class="stat-label">Day High</span>
+                    <span class="stat-value" id="detailHigh">152.30</span>
+                </div>
+                <div class="stock-stat">
+                    <span class="stat-label">Day Low</span>
+                    <span class="stat-value" id="detailLow">148.90</span>
+                </div>
+                <div class="stock-stat">
+                    <span class="stat-label">Volume</span>
+                    <span class="stat-value" id="detailVolume">45.2M</span>
+                </div>
+                <div class="stock-stat">
+                    <span class="stat-label">Avg Volume</span>
+                    <span class="stat-value" id="detailAvgVol">52.1M</span>
+                </div>
+                <div class="stock-stat">
+                    <span class="stat-label">Market Cap</span>
+                    <span class="stat-value" id="detailMarketCap">$2.4T</span>
+                </div>
+                <div class="stock-stat">
+                    <span class="stat-label">P/E Ratio</span>
+                    <span class="stat-value" id="detailPE">28.5</span>
+                </div>
+            </div>
+            <div class="stock-mentions-section" id="detailMentionsSection">
+                <div class="section-title">RECENT MENTIONS (<span id="detailMentionsCount">0</span>)</div>
+                <div class="stock-mentions-list" id="detailMentionsList">
+                    <!-- Mentions populated dynamically -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Status Bar - Key Stats -->
+        <div class="status-bar-top">
+            <div class="stat-item">
+                <span class="stat-label">ARTICLES:</span>
+                <span class="stat-value" id="totalArticles">-</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">MENTIONS:</span>
+                <span class="stat-value" id="totalMentions">-</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">ALERTS:</span>
+                <span class="stat-value red" id="totalAlerts">-</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">24H:</span>
+                <span class="stat-value green" id="articles24h">-</span>
+            </div>
+            <div class="stat-item" style="margin-left: auto;">
+                <span class="stat-label">LAST:</span>
+                <span class="stat-value" id="lastUpdated">--:--:--</span>
+            </div>
+        </div>
+
+        <!-- Navigation Tabs -->
+        <nav class="nav-tabs">
+            <button class="nav-tab active" data-tab="dashboard">
+                <i class="fas fa-chart-line"></i> DASHBOARD
+            </button>
+            <button class="nav-tab" data-tab="settings">
+                <i class="fas fa-cog"></i> SETTINGS
+            </button>
+        </nav>
+
+        <!-- Dashboard Tab Content -->
+        <div id="dashboardTab" class="tab-content active">
+            <!-- Main Terminal Grid -->
+            <div class="terminal-grid">
+                <!-- Top Mentions Panel -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2><i class="fas fa-trophy"></i> TOP MENTIONS</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="topCompanies" class="companies-list">
+                            <div class="loading">LOADING...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Market Monitor Panel (Bloomberg-style) -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2><i class="fas fa-globe"></i> MARKET MONITOR</h2>
+                        <span class="badge" id="marketStatus">LIVE</span>
+                    </div>
+                    <div class="panel-body">
+                        <div class="market-monitor">
+                            <!-- Major Indices -->
+                            <div class="market-section">
+                                <div class="section-header">INDICES</div>
+                                <div id="indicesList" class="indices-list">
+                                    <div class="market-item">
+                                        <span class="market-symbol">SPX</span>
+                                        <span class="market-price">--.--</span>
+                                        <span class="market-change flat">--.--</span>
+                                    </div>
+                                    <div class="market-item">
+                                        <span class="market-symbol">DJI</span>
+                                        <span class="market-price">--.--</span>
+                                        <span class="market-change flat">--.--</span>
+                                    </div>
+                                    <div class="market-item">
+                                        <span class="market-symbol">IXIC</span>
+                                        <span class="market-price">--.--</span>
+                                        <span class="market-change flat">--.--</span>
+                                    </div>
+                                    <div class="market-item">
+                                        <span class="market-symbol">RUT</span>
+                                        <span class="market-price">--.--</span>
+                                        <span class="market-change flat">--.--</span>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Gainers/Losers Toggle -->
+                            <div class="market-tabs">
+                                <button class="market-tab active" data-tab="gainers">GAINERS</button>
+                                <button class="market-tab" data-tab="losers">LOSERS</button>
+                                <button class="market-tab" data-tab="active">MOST ACTIVE</button>
+                            </div>
+                            
+                            <div id="marketMovers" class="movers-list">
+                                <div class="loading">LOADING...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Articles Feed Panel -->
+                <div class="panel articles-panel">
+                    <div class="panel-header">
+                        <h2><i class="fas fa-newspaper"></i> ARTICLES FEED</h2>
+                        <select id="articleFilter" class="filter-select">
+                            <option value="all">ALL SOURCES</option>
+                        </select>
+                    </div>
+                    <div class="panel-body">
+                        <div id="articlesList" class="articles-list">
+                            <div class="loading">LOADING ARTICLES...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Scrolling News Ticker -->
+            <div class="news-ticker-container" id="newsTickerContainer">
+                <div class="ticker-label">MARKETS</div>
+                <div class="ticker-scroll">
+                    <div class="ticker-content" id="newsTicker">
+                        <span class="stock-ticker-item">
+                            <span class="stock-symbol">LOADING</span>
+                            <span class="stock-price">--.--</span>
+                            <span class="stock-change flat">—0.00%</span>
+                        </span>
+                    </div>
+                </div>
+                <div class="ticker-controls">
+                    <button id="pauseTicker" title="Pause/Resume">
+                        <i class="fas fa-pause"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Bottom Status Bar -->
+            <div class="status-bar">
+                <span id="systemStatus">SYSTEM READY</span>
+                <span style="color: var(--accent-orange); font-size: 11px;">v2.0 - NICKBERG TERMINAL</span>
+                <span id="statusIndicator" class="status">
+                    <i class="fas fa-circle"></i> CONNECTED
+                </span>
+            </div>
+        </div>
+
+        <!-- Settings Tab Content -->
+        <div id="settingsTab" class="tab-content">
+            <div class="settings-container">
+                <!-- Watchlist Management -->
+                <div class="settings-section">
+                    <div class="settings-section-header">
+                        <h3><i class="fas fa-list"></i> WATCHLIST MANAGEMENT</h3>
+                    </div>
+                    <div class="settings-section-body">
+                        <p class="setting-label-hint" style="margin-bottom: 12px;">
+                            Add or remove companies from your monitoring watchlist.
+                        </p>
+                        <div class="tag-input-container">
+                            <div id="watchlistTags" class="tag-list">
+                                <!-- Tags will be populated dynamically -->
+                            </div>
+                            <div class="tag-add-form">
+                                <input type="text" id="tickerInput" placeholder="TICKER (e.g., AAPL)" maxlength="5">
+                                <input type="text" id="namesInput" placeholder="NAMES (comma-separated)">
+                                <button type="button" class="btn" id="addTickerBtn">
+                                    <i class="fas fa-plus"></i> ADD
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Alert Channels -->
+                <div class="settings-section">
+                    <div class="settings-section-header">
+                        <h3><i class="fas fa-bell"></i> ALERT CHANNELS</h3>
+                    </div>
+                    <div class="settings-section-body">
+                        <div class="setting-row">
+                            <div class="setting-label">
+                                <span class="setting-label-text">Console Output</span>
+                                <span class="setting-label-hint">Display alerts in terminal</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="channelConsole" checked>
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="setting-row">
+                            <div class="setting-label">
+                                <span class="setting-label-text">File Logging</span>
+                                <span class="setting-label-hint">Save alerts to log file</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="channelFile" checked>
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="setting-row">
+                            <div class="setting-label">
+                                <span class="setting-label-text">Telegram Notifications</span>
+                                <span class="setting-label-hint">Send alerts via Telegram bot</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="channelTelegram">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="setting-row">
+                            <div class="setting-label">
+                                <span class="setting-label-text">Webhook</span>
+                                <span class="setting-label-hint">POST alerts to external webhook</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="channelWebhook">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Severity Routing -->
+                <div class="settings-section">
+                    <div class="settings-section-header">
+                        <h3><i class="fas fa-route"></i> SEVERITY ROUTING</h3>
+                    </div>
+                    <div class="settings-section-body">
+                        <p class="setting-label-hint" style="margin-bottom: 12px;">
+                            Configure which channels receive alerts for each severity level.
+                        </p>
+                        <table class="routing-table">
+                            <thead>
+                                <tr>
+                                    <th>SEVERITY</th>
+                                    <th>CONSOLE</th>
+                                    <th>FILE</th>
+                                    <th>TELEGRAM</th>
+                                    <th>WEBHOOK</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><span class="severity-label high"><i class="fas fa-exclamation-circle"></i> HIGH</span></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="high" data-channel="console" checked></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="high" data-channel="file" checked></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="high" data-channel="telegram" checked></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="high" data-channel="webhook" checked></td>
+                                </tr>
+                                <tr>
+                                    <td><span class="severity-label medium"><i class="fas fa-exclamation-triangle"></i> MEDIUM</span></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="medium" data-channel="console" checked></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="medium" data-channel="file" checked></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="medium" data-channel="telegram"></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="medium" data-channel="webhook"></td>
+                                </tr>
+                                <tr>
+                                    <td><span class="severity-label low"><i class="fas fa-info-circle"></i> LOW</span></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="low" data-channel="console"></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="low" data-channel="file" checked></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="low" data-channel="telegram"></td>
+                                    <td><input type="checkbox" class="routing-checkbox" data-severity="low" data-channel="webhook"></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Pattern Thresholds -->
+                <div class="settings-section">
+                    <div class="settings-section-header">
+                        <h3><i class="fas fa-sliders-h"></i> PATTERN THRESHOLDS</h3>
+                    </div>
+                    <div class="settings-section-body">
+                        <div class="setting-row">
+                            <div class="setting-label">
+                                <span class="setting-label-text">Volume Spike Threshold</span>
+                                <span class="setting-label-hint">Multiplier vs 7-day average to trigger alert</span>
+                            </div>
+                            <div class="slider-container">
+                                <input type="range" class="slider-input" id="volumeThreshold" min="1" max="10" step="0.5" value="3">
+                                <span class="slider-value" id="volumeThresholdValue">3.0x</span>
+                            </div>
+                        </div>
+                        <div class="setting-row">
+                            <div class="setting-label">
+                                <span class="setting-label-text">Minimum Articles</span>
+                                <span class="setting-label-hint">Minimum articles required to trigger alert</span>
+                            </div>
+                            <input type="number" class="number-input" id="minArticles" min="1" max="50" value="3">
+                        </div>
+                        <div class="setting-row">
+                            <div class="setting-label">
+                                <span class="setting-label-text">Sentiment Shift Threshold</span>
+                                <span class="setting-label-hint">Minimum sentiment change to trigger alert</span>
+                            </div>
+                            <div class="slider-container">
+                                <input type="range" class="slider-input" id="sentimentThreshold" min="0.1" max="1" step="0.1" value="0.3">
+                                <span class="slider-value" id="sentimentThresholdValue">0.3</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Per-Company Preferences -->
+                <div class="settings-section">
+                    <div class="settings-section-header">
+                        <h3><i class="fas fa-building"></i> PER-COMPANY PREFERENCES</h3>
+                    </div>
+                    <div class="settings-section-body">
+                        <p class="setting-label-hint" style="margin-bottom: 12px;">
+                            Configure alert settings for specific companies. Leave empty to use default settings.
+                        </p>
+                        <div id="companyPreferences" class="settings-grid">
+                            <!-- Company preference cards will be populated dynamically -->
+                        </div>
+                        <div id="noCompanyPrefs" class="empty-state" style="padding: 16px;">
+                            <p>Add companies to the watchlist to configure per-company preferences.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Save Button -->
+                <div class="save-btn-container">
+                    <button type="button" class="btn-save" id="saveSettingsBtn">
+                        <i class="fas fa-save"></i> SAVE SETTINGS
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <!-- Chart.js for charts (optional) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <!-- Dashboard JavaScript -->
+    <script src="/static/js/dashboard.js?v=999"></script>
+</body>
+</html>

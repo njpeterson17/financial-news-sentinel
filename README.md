@@ -1,4 +1,4 @@
-# News Sentinel Bot
+# Nickberg Terminal
 
 A financial news monitoring bot that scrapes major news sources to detect coverage patterns like volume spikes, sentiment shifts, and momentum building for tracked companies.
 
@@ -388,7 +388,7 @@ Create `/etc/systemd/system/news-sentinel.service`:
 
 ```ini
 [Unit]
-Description=News Sentinel Bot
+Description=Nickberg Terminal
 
 [Service]
 Type=oneshot
@@ -401,7 +401,7 @@ Create `/etc/systemd/system/news-sentinel.timer`:
 
 ```ini
 [Unit]
-Description=Run News Sentinel Bot every 15 minutes
+Description=Run Nickberg Terminal every 15 minutes
 
 [Timer]
 OnBootSec=5min

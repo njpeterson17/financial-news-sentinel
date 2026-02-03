@@ -1,5 +1,5 @@
 """
-Backtesting system for News Sentinel Bot.
+Backtesting system for Nickberg Terminal.
 
 Allows replaying pattern detection against historical data to:
 - Evaluate pattern detection performance

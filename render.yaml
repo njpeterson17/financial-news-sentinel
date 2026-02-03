@@ -1,0 +1,47 @@
+# Render.com Deployment Configuration
+# See: https://render.com/docs/infrastructure-as-code
+
+services:
+  # Web Dashboard Service
+  - type: web
+    name: news-sentinel-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn web.app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: FLASK_ENV
+        value: production
+      - key: NEWS_SENTINEL_DB_PATH
+        value: /opt/render/project/src/data/news_sentinel.db
+      - key: SCRAPER_MODE
+        value: schedule
+      - key: SCRAPER_INTERVAL_SECONDS
+        value: 900
+    disk:
+      name: data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+
+  # Background Scraper Service (runs continuously)
+  - type: worker
+    name: news-sentinel-scraper
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python src/main.py run
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: SCRAPER_MODE
+        value: continuous
+      - key: SCRAPER_INTERVAL_SECONDS
+        value: 900
+      - key: NEWS_SENTINEL_DB_PATH
+        value: /opt/render/project/src/data/news_sentinel.db
+    disk:
+      name: data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1

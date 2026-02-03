@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# News Sentinel Bot - Docker Entrypoint Script
+# Nickberg Terminal - Docker Entrypoint Script
 # Handles different run modes: scraper, web, or custom commands
 
 # =============================================================================
@@ -71,7 +71,7 @@ validate_environment() {
 # =============================================================================
 
 run_scraper() {
-    log_info "Starting News Sentinel Bot scraper..."
+    log_info "Starting Nickberg Terminal scraper..."
 
     wait_for_db
 
@@ -105,7 +105,7 @@ run_scraper() {
 }
 
 run_web() {
-    log_info "Starting News Sentinel Bot web dashboard..."
+    log_info "Starting Nickberg Terminal web dashboard..."
 
     wait_for_db
 
@@ -143,7 +143,7 @@ run_status() {
 # =============================================================================
 
 main() {
-    log_info "News Sentinel Bot starting..."
+    log_info "Nickberg Terminal starting..."
     log_info "Python version: $(python --version)"
     log_info "Working directory: $(pwd)"
 

@@ -1,5 +1,5 @@
 """
-News Sentinel Bot - Main runner
+Nickberg Terminal - Main runner
 """
 
 import os
@@ -39,7 +39,7 @@ def record_last_scrape_time():
         get_logger(__name__).warning("Failed to record last scrape time", extra={"error": str(e)})
 
 
-class NewsSentinelBot:
+class NickbergTerminal:
     """Main bot class"""
 
     def __init__(self, config_path: str = "config/settings.yaml"):
@@ -133,7 +133,7 @@ class NewsSentinelBot:
 
     def run(self, dry_run: bool = False):
         """Run one cycle of the bot"""
-        self.logger.info("Starting News Sentinel Bot cycle", extra={"dry_run": dry_run})
+        self.logger.info("Starting Nickberg Terminal cycle", extra={"dry_run": dry_run})
 
         # Step 1: Scrape articles
         self.logger.info("Scraping articles", extra={"step": 1})
@@ -255,7 +255,7 @@ class NewsSentinelBot:
         stats = self.db.get_stats()
 
         print("\n" + "=" * 50)
-        print("News Sentinel Bot - Status")
+        print("Nickberg Terminal - Status")
         print("=" * 50)
         print(f"Total articles: {stats['total_articles']}")
         print(f"Total mentions: {stats['total_mentions']}")
@@ -353,7 +353,7 @@ def run_backtest(args, bot: NewsSentinelBot):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="News Sentinel Bot")
+    parser = argparse.ArgumentParser(description="Nickberg Terminal")
     parser.add_argument(
         "-c", "--config", default="config/settings.yaml", help="Path to config file"
     )

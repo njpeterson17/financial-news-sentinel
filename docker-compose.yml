@@ -1,4 +1,4 @@
-# News Sentinel Bot - Docker Compose Configuration
+# Nickberg Terminal - Docker Compose Configuration
 # Production-ready setup with scraper and web dashboard services
 
 version: "3.8"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start News Sentinel Bot Web Dashboard
+# Start Nickberg Terminal Web Dashboard
 
 cd "$(dirname "$0")"
 

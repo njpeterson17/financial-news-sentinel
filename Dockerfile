@@ -1,14 +1,15 @@
-# News Sentinel Bot - Docker Image
-# Production-ready container for news scraping and monitoring
+# Production Dockerfile for Nickberg Terminal
+# Multi-stage build for smaller image size
 
-# =============================================================================
 # Stage 1: Build dependencies
-# =============================================================================
-FROM python:3.12-slim AS builder
+FROM python:3.11-slim as builder
+
+WORKDIR /app
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    gcc \
+    libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create virtual environment
@@ -18,72 +19,40 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt gunicorn
 
-# =============================================================================
 # Stage 2: Production image
-# =============================================================================
-FROM python:3.12-slim
+FROM python:3.11-slim
 
-# Labels for container identification
-LABEL maintainer="News Sentinel Bot"
-LABEL description="News scraping and monitoring bot with web dashboard"
-LABEL version="1.0"
-
-# Security: Create non-root user
-RUN groupadd --gid 1000 newsbot && \
-    useradd --uid 1000 --gid 1000 --shell /bin/bash --create-home newsbot
+WORKDIR /app
 
 # Install runtime dependencies only
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsqlite3-0 \
     curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Set environment variables
-ENV PATH="/opt/venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH="/app/src" \
-    # Flask configuration
-    FLASK_APP=web/app.py \
-    FLASK_ENV=production \
-    # Application defaults
-    NEWS_SENTINEL_CONFIG=/app/config/settings.yaml \
-    NEWS_SENTINEL_LOG_LEVEL=INFO
-
-# Set working directory
-WORKDIR /app
-
-# Create necessary directories with correct permissions
-RUN mkdir -p /app/data /app/logs /app/config && \
-    chown -R newsbot:newsbot /app
+# Create non-root user for security
+RUN useradd -m -u 1000 appuser && \
+    mkdir -p data logs && \
+    chown -R appuser:appuser /app
 
 # Copy application code
-COPY --chown=newsbot:newsbot src/ /app/src/
-COPY --chown=newsbot:newsbot web/ /app/web/
-COPY --chown=newsbot:newsbot config/ /app/config/
-COPY --chown=newsbot:newsbot requirements.txt /app/
-
-# Copy entrypoint script
-COPY --chown=newsbot:newsbot docker-entrypoint.sh /app/
-RUN chmod +x /app/docker-entrypoint.sh
+COPY --chown=appuser:appuser . .
 
 # Switch to non-root user
-USER newsbot
+USER appuser
 
-# Expose web dashboard port
+# Expose port
 EXPOSE 5000
 
-# Health check for the web dashboard
+# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:5000/ || exit 1
+    CMD curl -f http://localhost:5000/health || exit 1
 
-# Default entrypoint
-ENTRYPOINT ["/app/docker-entrypoint.sh"]
-
-# Default command (can be overridden)
-CMD ["scraper"]
+# Default command (web server)
+CMD ["gunicorn", "web.app:app", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120", "--access-logfile", "-", "--error-logfile", "-"]
