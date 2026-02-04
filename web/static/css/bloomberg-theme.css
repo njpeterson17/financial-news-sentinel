@@ -196,7 +196,7 @@ body {
 /* Terminal Grid Layout */
 .terminal-grid {
   display: grid;
-  grid-template-columns: 380px 240px 1fr;
+  grid-template-columns: 1fr 240px 340px;
   gap: 1px;
   background: var(--border-color);
   flex: 1;
@@ -2702,7 +2702,7 @@ body {
    BLUESKY FINANCIAL FEED STYLES
    ============================================ */
 
-/* Full-Height Bluesky Panel */
+/* Bluesky Panel (Narrow) */
 .bluesky-panel-full {
   display: flex;
   flex-direction: column;
@@ -2718,7 +2718,7 @@ body {
 .bluesky-feed-full {
   flex: 1;
   overflow-y: auto;
-  min-height: 500px;
+  min-height: 400px;
   background: var(--bg-primary);
 }
 
