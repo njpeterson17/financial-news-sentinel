@@ -138,17 +138,12 @@ async function initDashboard() {
 
 // Bluesky Financial Accounts to follow
 const BLUESKY_FINANCIAL_ACCOUNTS = [
-    { handle: 'deitaone.bsky.social', name: 'DeItaOne', display: 'DeItaOne' },
-    { handle: 'firstsquawk.bsky.social', name: 'First Squawk', display: 'First Squawk' },
     { handle: 'unusualwhales.bsky.social', name: 'Unusual Whales', display: 'Unusual Whales' },
-    { handle: 'bespokeinvest.bsky.social', name: 'Bespoke Invest', display: 'Bespoke Invest' },
     { handle: 'strazza.bsky.social', name: 'Strazza', display: 'Strazza' },
     { handle: 'stocktwits.bsky.social', name: 'StockTwits', display: 'StockTwits' },
     { handle: 'benzinga.bsky.social', name: 'Benzinga', display: 'Benzinga' },
-    { handle: 'traderstewie.bsky.social', name: 'Trader Stewie', display: 'Trader Stewie' },
     { handle: 'fintwit.bsky.social', name: 'FinTwit', display: 'FinTwit' },
     { handle: 'markminervini.bsky.social', name: 'Mark Minervini', display: 'Mark Minervini' },
-    { handle: 'ivanchart.bsky.social', name: 'Ivan Chart', display: 'Ivan Chart' },
     { handle: 'sentiment.bsky.social', name: 'Sentiment', display: 'Sentiment' }
 ];
 
