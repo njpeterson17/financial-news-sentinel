@@ -39,6 +39,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
     setupSettingsEventListeners();
     initTicker();
+    initMobileFeatures();
 
     // Auto-refresh every 60 seconds
     setInterval(refreshData, 60000);
@@ -54,6 +55,81 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }, 60000);
 });
+
+// Mobile-specific features
+function initMobileFeatures() {
+    // Detect touch devices
+    const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
+    
+    if (isTouchDevice) {
+        document.body.classList.add('touch-device');
+        
+        // Add swipe gesture support for tabs
+        let touchStartX = 0;
+        let touchEndX = 0;
+        
+        document.addEventListener('touchstart', (e) => {
+            touchStartX = e.changedTouches[0].screenX;
+        }, { passive: true });
+        
+        document.addEventListener('touchend', (e) => {
+            touchEndX = e.changedTouches[0].screenX;
+            handleSwipe();
+        }, { passive: true });
+        
+        function handleSwipe() {
+            const swipeThreshold = 50;
+            const diff = touchStartX - touchEndX;
+            
+            if (Math.abs(diff) > swipeThreshold) {
+                const tabs = document.querySelectorAll('.nav-tab');
+                const activeTab = document.querySelector('.nav-tab.active');
+                const currentIndex = Array.from(tabs).indexOf(activeTab);
+                
+                if (diff > 0 && currentIndex < tabs.length - 1) {
+                    // Swipe left - next tab
+                    tabs[currentIndex + 1].click();
+                } else if (diff < 0 && currentIndex > 0) {
+                    // Swipe right - previous tab
+                    tabs[currentIndex - 1].click();
+                }
+            }
+        }
+    }
+    
+    // Handle viewport changes
+    window.addEventListener('resize', debounce(() => {
+        adjustLayoutForScreenSize();
+    }, 250));
+    
+    // Initial layout adjustment
+    adjustLayoutForScreenSize();
+}
+
+// Adjust layout based on screen size
+function adjustLayoutForScreenSize() {
+    const width = window.innerWidth;
+    const isMobile = width <= 768;
+    
+    // Adjust chart heights for mobile
+    if (isMobile && typeof Chart !== 'undefined') {
+        Chart.defaults.responsive = true;
+        Chart.defaults.maintainAspectRatio = false;
+    }
+}
+
+// Debounce utility for performance
+function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+        const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+    };
+}
 
 async function initDashboard() {
     await loadAllData();
