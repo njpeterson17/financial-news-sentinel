@@ -2582,3 +2582,118 @@ body {
 .keyword-tag.hot .keyword-count {
   color: #ff4444;
 }
+
+/* Full-Height Twitter Panel */
+.twitter-panel-full {
+  display: flex;
+  flex-direction: column;
+}
+
+.twitter-panel-full .panel-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.twitter-feed-full {
+  flex: 1;
+  overflow: hidden;
+  min-height: 500px;
+}
+
+.twitter-feed-full iframe {
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 500px;
+}
+
+.twitter-fallback-full {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  min-height: 500px;
+}
+
+/* Compact Top Mentions in Market Monitor */
+.top-mentions-section-compact {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+}
+
+.companies-list-compact {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.companies-list-compact .company-item {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.companies-list-compact .company-item:last-child {
+  border-bottom: none;
+}
+
+.companies-list-compact .company-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.companies-list-compact .company-rank {
+  font-size: 10px;
+  color: var(--accent-orange);
+  font-weight: bold;
+  margin-right: 6px;
+}
+
+.companies-list-compact .company-name {
+  font-size: 11px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.companies-list-compact .company-ticker {
+  font-size: 9px;
+  color: var(--text-secondary);
+}
+
+.companies-list-compact .company-stats {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.companies-list-compact .company-price {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.companies-list-compact .company-price .price {
+  font-size: 11px;
+  color: var(--text-primary);
+  font-weight: bold;
+}
+
+.companies-list-compact .company-price .change {
+  font-size: 9px;
+  padding: 1px 3px;
+  border-radius: 2px;
+}
+
+.companies-list-compact .company-price .change.up {
+  color: var(--green);
+  background: rgba(0, 200, 81, 0.1);
+}
+
+.companies-list-compact .company-price .change.down {
+  color: var(--red);
+  background: rgba(255, 68, 68, 0.1);
+}

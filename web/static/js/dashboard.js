@@ -656,17 +656,22 @@ async function loadTopCompanies() {
     const response = await fetchWithTimeout('/api/companies/top?limit=10');
     const companies = await response.json();
     
+    // Full panel (if exists - index.html)
     const container = document.getElementById('topCompanies');
+    // Compact panel (inside Market Monitor - bloomberg-dashboard.html)
+    const containerCompact = document.getElementById('topCompaniesCompact');
     
     if (companies.length === 0) {
-        container.innerHTML = '<div class="empty-state">NO DATA</div>';
+        const emptyHtml = '<div class="empty-state">NO DATA</div>';
+        if (container) container.innerHTML = emptyHtml;
+        if (containerCompact) containerCompact.innerHTML = emptyHtml;
         return;
     }
     
     // Get tickers for price fetching
     const tickers = companies.map(c => c.company_ticker);
     
-    container.innerHTML = companies.map((company, index) => `
+    const html = companies.map((company, index) => `
         <div class="company-item" data-ticker="${company.company_ticker}">
             <div class="company-info">
                 <span class="company-rank ${index < 3 ? 'top' : ''}">${index + 1}</span>
@@ -683,6 +688,10 @@ async function loadTopCompanies() {
             </div>
         </div>
     `).join('');
+    
+    // Populate both containers
+    if (container) container.innerHTML = html;
+    if (containerCompact) containerCompact.innerHTML = html;
     
     // Fetch prices after rendering
     await loadPrices(tickers);
@@ -711,7 +720,8 @@ async function loadPrices(tickers) {
 
 // Update price display in Top Companies panel
 function updatePriceDisplay(prices) {
-    document.querySelectorAll('.company-item').forEach(item => {
+    // Update all company items across both containers
+    document.querySelectorAll('#topCompanies .company-item, #topCompaniesCompact .company-item').forEach(item => {
         const ticker = item.dataset.ticker;
         const priceEl = item.querySelector('.company-price');
         
