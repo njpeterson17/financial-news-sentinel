@@ -259,6 +259,123 @@ sources:
     rss_feeds:
       - "https://cointelegraph.com/rss"
 
+  # === TIER 7: Additional Quality Sources ===
+
+  barrons:
+    enabled: true
+    name: "Barron's"
+    rss_feeds:
+      - "https://www.barrons.com/market-data/rss/news"
+
+  investorplace:
+    enabled: true
+    name: "InvestorPlace"
+    rss_feeds:
+      - "https://investorplace.com/feed/"
+
+  axios:
+    enabled: true
+    name: "Axios"
+    rss_feeds:
+      - "https://www.axios.com/feeds/feed.rss"
+
+  quartz:
+    enabled: true
+    name: "Quartz"
+    rss_feeds:
+      - "https://qz.com/rss"
+
+  economist:
+    enabled: true
+    name: "The Economist"
+    rss_feeds:
+      - "https://www.economist.com/business/rss.xml"
+      - "https://www.economist.com/finance-and-economics/rss.xml"
+
+  ibd:
+    enabled: true
+    name: "Investor's Business Daily"
+    rss_feeds:
+      - "https://www.investors.com/feed/"
+
+  kiplinger:
+    enabled: true
+    name: "Kiplinger"
+    rss_feeds:
+      - "https://www.kiplinger.com/feed/investing"
+      - "https://www.kiplinger.com/feed/retirement"
+
+  nasdaqnews:
+    enabled: true
+    name: "Nasdaq News"
+    rss_feeds:
+      - "https://www.nasdaq.com/feed/rssoutbound?category=Markets"
+      - "https://www.nasdaq.com/feed/rssoutbound?category=Technology"
+
+  etfcom:
+    enabled: true
+    name: "ETF.com"
+    rss_feeds:
+      - "https://www.etf.com/rss/news.xml"
+
+  institutionalinvestor:
+    enabled: true
+    name: "Institutional Investor"
+    rss_feeds:
+      - "https://www.institutionalinvestor.com/rss"
+
+  # === TIER 8: International Markets ===
+
+  scmp_business:
+    enabled: true
+    name: "South China Morning Post"
+    rss_feeds:
+      - "https://www.scmp.com/rss/91/feed"
+
+  nikkei:
+    enabled: true
+    name: "Nikkei Asia"
+    rss_feeds:
+      - "https://asia.nikkei.com/rss/feed/nar"
+
+  dw_business:
+    enabled: true
+    name: "DW Business"
+    rss_feeds:
+      - "https://rss.dw.com/rdf/rss-en-bus"
+
+  aljazeera_economy:
+    enabled: true
+    name: "Al Jazeera Economy"
+    rss_feeds:
+      - "https://www.aljazeera.com/xml/rss/all.xml"
+
+  # === TIER 9: Specialized & Alternative ===
+
+  zerohedge:
+    enabled: true
+    name: "Zero Hedge"
+    rss_feeds:
+      - "https://feeds.feedburner.com/zerohedge/feed"
+
+  nakedcapitalism:
+    enabled: true
+    name: "Naked Capitalism"
+    rss_feeds:
+      - "https://www.nakedcapitalism.com/feed"
+
+  wolfstreet:
+    enabled: true
+    name: "Wolf Street"
+    rss_feeds:
+      - "https://wolfstreet.com/feed/"
+
+  calculatedrisk:
+    enabled: true
+    name: "Calculated Risk"
+    rss_feeds:
+      - "https://www.calculatedriskblog.com/feeds/posts/default"
+
 # Pattern detection
 patterns:
   # Volume spike threshold (articles in 24h vs 7-day average)

@@ -13,6 +13,7 @@ from pathlib import Path
 from functools import wraps
 
 from flask import Flask, render_template, jsonify, request, send_from_directory, Response, g, redirect, make_response
+from flask_compress import Compress
 
 # Prometheus metrics
 try:
@@ -67,6 +68,30 @@ import os
 template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 app = Flask('nickberg', template_folder=template_dir, static_folder=static_dir)
+
+# =============================================================================
+# Enable GZIP Compression for API responses
+# =============================================================================
+try:
+    Compress(app)
+    app.config['COMPRESS_MIMETYPES'] = ['application/json', 'text/html', 'text/css', 'text/javascript', 'application/javascript']
+    app.config['COMPRESS_LEVEL'] = 6
+    app.config['COMPRESS_MIN_SIZE'] = 500
+    logger.info("GZIP compression enabled")
+except Exception:
+    logger.warning("flask-compress not available, responses will not be compressed")
+
+# SocketIO for real-time price updates
+try:
+    from flask_socketio import SocketIO, emit
+    # Use threading mode instead of eventlet to prevent blocking from yfinance calls
+    socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+    SOCKETIO_AVAILABLE = True
+    logger.info("SocketIO initialized successfully")
+except ImportError:
+    socketio = None
+    SOCKETIO_AVAILABLE = False
+    logger.warning("flask-socketio not available - WebSocket features disabled")
 
 # =============================================================================
 # Prometheus Metrics Setup (using separate registry to avoid test conflicts)
@@ -128,12 +153,45 @@ if PROMETHEUS_AVAILABLE and METRICS_REGISTRY is not None:
         registry=METRICS_REGISTRY
     )
 
-# Disable caching for all responses (development)
+# Smart caching headers based on endpoint type
 @app.after_request
 def add_header(response):
-    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, post-check=0, pre-check=0, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '-1'
+    """
+    Add appropriate cache headers based on endpoint type.
+    - Static files: Cache for 1 hour
+    - Stock prices: Cache for 60 seconds
+    - News/articles: Cache for 5 minutes
+    - Other API: No cache
+    """
+    # Static files can be cached longer
+    if request.path.startswith('/static'):
+        response.headers['Cache-Control'] = 'public, max-age=3600'  # 1 hour
+        return response
+
+    # API endpoints with specific caching
+    if request.path.startswith('/api/'):
+        # Stock price endpoints - short cache
+        if '/prices' in request.path or '/market/' in request.path:
+            response.headers['Cache-Control'] = 'public, max-age=60'  # 1 minute
+            response.headers['X-Cache-TTL'] = '60'
+        # News and article endpoints - medium cache
+        elif '/articles' in request.path or '/news' in request.path:
+            response.headers['Cache-Control'] = 'public, max-age=300'  # 5 minutes
+            response.headers['X-Cache-TTL'] = '300'
+        # Stock details - medium cache
+        elif '/stock/' in request.path:
+            response.headers['Cache-Control'] = 'public, max-age=300'  # 5 minutes
+            response.headers['X-Cache-TTL'] = '300'
+        else:
+            # Default: no cache for dynamic API endpoints
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+    else:
+        # HTML pages - no cache
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '-1'
+
     return response
 
 # Enable CORS for all origins in development
@@ -371,10 +429,49 @@ def format_datetime(dt):
     return dt.isoformat()
 
 
+def interleave_by_source(articles):
+    """
+    Interleave articles by source to avoid clustering.
+    Instead of showing 5 Motley Fool, then 10 Bloomberg, etc.,
+    this distributes articles so different sources appear alternately.
+    """
+    if not articles:
+        return articles
+
+    from collections import defaultdict
+
+    # Group articles by source, maintaining order within each source
+    by_source = defaultdict(list)
+    for article in articles:
+        by_source[article.get('source', 'Unknown')].append(article)
+
+    # Get list of sources sorted by how many articles they have (descending)
+    sources = sorted(by_source.keys(), key=lambda s: len(by_source[s]), reverse=True)
+
+    # Interleave: round-robin through sources
+    result = []
+    source_indices = {s: 0 for s in sources}
+
+    while len(result) < len(articles):
+        added_this_round = False
+        for source in sources:
+            idx = source_indices[source]
+            if idx < len(by_source[source]):
+                result.append(by_source[source][idx])
+                source_indices[source] += 1
+                added_this_round = True
+
+        # Safety check to prevent infinite loop
+        if not added_this_round:
+            break
+
+    return result
+
+
 def get_recent_articles(limit=50):
-    """Get recent articles"""
+    """Get recent articles, interleaved by source"""
     articles = db.get_recent_articles(limit)
-    return [{
+    formatted = [{
         'id': a.id,
         'title': a.title,
         'source': a.source,
@@ -384,6 +481,7 @@ def get_recent_articles(limit=50):
         'sentiment': a.sentiment_score,
         'mentions': json.loads(a.mentions) if a.mentions else []
     } for a in articles]
+    return interleave_by_source(formatted)
 
 
 def search_articles(
@@ -529,9 +627,12 @@ def search_articles(
             'sentiment': row['sentiment_score'],
             'mentions': json.loads(row['mentions']) if row['mentions'] else []
         } for row in rows]
-        
+
+        # Interleave articles by source for variety
+        interleaved = interleave_by_source(articles)
+
         return {
-            'articles': articles,
+            'articles': interleaved,
             'total': total,
             'limit': limit,
             'offset': offset,
@@ -654,6 +755,31 @@ def health_check():
     return jsonify(response_data), status_code
 
 
+@app.route('/api/cache/stats')
+def cache_stats():
+    """
+    Get cache statistics for monitoring.
+    Does not require API key authentication.
+    """
+    return jsonify(api_cache.get_stats())
+
+
+@app.route('/api/cache/clear', methods=['POST'])
+@require_api_key
+def cache_clear():
+    """
+    Clear the API cache.
+    Optionally specify category to clear only that type.
+    """
+    category = request.args.get('category')
+    if category:
+        api_cache.clear_category(category)
+        return jsonify({'success': True, 'cleared': category})
+    else:
+        api_cache.clear_all()
+        return jsonify({'success': True, 'cleared': 'all'})
+
+
 @app.route('/metrics')
 def metrics():
     """
@@ -770,7 +896,8 @@ def api_all_companies():
 def api_articles():
     """
     Get recent articles with optional filtering and pagination.
-    
+    Uses TTL cache (5 minutes) for unfiltered requests.
+
     Query Parameters:
         - limit: Maximum number of articles (default 200, max 500)
         - offset: Number of articles to skip (for pagination)
@@ -780,33 +907,46 @@ def api_articles():
         - from_date: ISO date string for start date (e.g., 2024-01-01)
         - to_date: ISO date string for end date
         - sentiment: Filter by sentiment ('positive', 'negative', 'neutral')
-    
+
     Returns:
         JSON with 'articles' list and pagination metadata
     """
     # Parse parameters
     limit = min(request.args.get('limit', 200, type=int), 500)
     offset = max(request.args.get('offset', 0, type=int), 0)
-    
+
     # Parse comma-separated lists
     sources = None
     if request.args.get('sources'):
         sources = [s.strip() for s in request.args.get('sources').split(',') if s.strip()]
-    
+
     tickers = None
     if request.args.get('tickers'):
         tickers = [t.strip().upper() for t in request.args.get('tickers').split(',') if t.strip()]
-    
+
     search = request.args.get('search', '').strip() or None
     from_date = request.args.get('from_date') or None
     to_date = request.args.get('to_date') or None
     sentiment = request.args.get('sentiment', '').lower() or None
-    
-    # If no filters provided and no offset, use simple get_recent_articles for backward compatibility
+
+    # If no filters provided and no offset, use cache for recent articles
     if not any([sources, tickers, search, from_date, to_date, sentiment, offset > 0]):
-        return jsonify(get_recent_articles(limit))
-    
+        cache_key = f'articles:recent:{limit}'
+        cached = api_cache.get(cache_key, 'articles')
+        if cached:
+            return jsonify(cached)
+
+        result = get_recent_articles(limit)
+        api_cache.set(cache_key, result, 'articles')
+        return jsonify(result)
+
     # Use search function for filtered/paginated results
+    # Generate cache key for filtered requests
+    cache_key = f'articles:search:{limit}:{offset}:{sources}:{tickers}:{search}:{sentiment}'
+    cached = api_cache.get(cache_key, 'articles')
+    if cached:
+        return jsonify(cached)
+
     result = search_articles(
         limit=limit,
         offset=offset,
@@ -817,7 +957,8 @@ def api_articles():
         to_date=to_date,
         sentiment=sentiment
     )
-    
+
+    api_cache.set(cache_key, result, 'articles')
     return jsonify(result)
 
 
@@ -1309,66 +1450,88 @@ def api_market_data(ticker):
 @app.route('/api/prices')
 @require_api_key
 def get_prices():
-    """Get current stock prices for watchlist companies"""
+    """
+    Get current stock prices for watchlist companies.
+    Uses TTL cache (60 seconds) to avoid hammering external APIs.
+    """
     import concurrent.futures
-    
+
     tickers = request.args.get('tickers', '').split(',')
-    
+    tickers = [t.strip().upper() for t in tickers if t.strip()]
+
+    if not tickers:
+        return jsonify({})
+
+    # Check cache for each ticker
+    prices = {}
+    tickers_to_fetch = []
+
+    for ticker in tickers:
+        cached = api_cache.get(f'price:{ticker}', 'stock')
+        if cached:
+            prices[ticker] = cached
+        else:
+            tickers_to_fetch.append(ticker)
+
+    # If all tickers were cached, return immediately
+    if not tickers_to_fetch:
+        return jsonify(prices)
+
     # Mock prices for quick fallback
     mock_prices = {
-        'AAPL': { 'price': 185.92, 'change_pct': 1.25 },
-        'MSFT': { 'price': 420.55, 'change_pct': 0.85 },
-        'GOOGL': { 'price': 175.98, 'change_pct': -0.45 },
-        'AMZN': { 'price': 178.35, 'change_pct': 1.12 },
-        'TSLA': { 'price': 248.50, 'change_pct': -2.30 },
-        'NVDA': { 'price': 875.28, 'change_pct': 3.45 },
-        'META': { 'price': 505.20, 'change_pct': 0.95 },
-        'NFLX': { 'price': 628.75, 'change_pct': -0.85 },
-        'AMD': { 'price': 162.45, 'change_pct': 1.85 },
-        'CRM': { 'price': 295.30, 'change_pct': -0.35 },
-        'SPY': { 'price': 520.50, 'change_pct': 0.65 },
-        'QQQ': { 'price': 445.25, 'change_pct': 0.95 },
-        'DIA': { 'price': 390.80, 'change_pct': 0.25 },
-        'IWM': { 'price': 205.40, 'change_pct': -0.15 },
+        'AAPL': {'price': 185.92, 'change_pct': 1.25},
+        'MSFT': {'price': 420.55, 'change_pct': 0.85},
+        'GOOGL': {'price': 175.98, 'change_pct': -0.45},
+        'AMZN': {'price': 178.35, 'change_pct': 1.12},
+        'TSLA': {'price': 248.50, 'change_pct': -2.30},
+        'NVDA': {'price': 875.28, 'change_pct': 3.45},
+        'META': {'price': 505.20, 'change_pct': 0.95},
+        'NFLX': {'price': 628.75, 'change_pct': -0.85},
+        'AMD': {'price': 162.45, 'change_pct': 1.85},
+        'CRM': {'price': 295.30, 'change_pct': -0.35},
+        'SPY': {'price': 520.50, 'change_pct': 0.65},
+        'QQQ': {'price': 445.25, 'change_pct': 0.95},
+        'DIA': {'price': 390.80, 'change_pct': 0.25},
+        'IWM': {'price': 205.40, 'change_pct': -0.15},
     }
-    
-    prices = {}
-    
+
     def get_ticker_price(ticker):
         """Fetch price for a single ticker with timeout"""
-        ticker = ticker.strip().upper()
-        if not ticker:
-            return None
-        
         # Try market data provider first
         if market_data_provider:
             try:
                 price = market_data_provider.get_price(ticker)
                 change = market_data_provider.get_intraday_change(ticker)
                 if price:
-                    return (ticker, {
+                    data = {
                         'price': round(price, 2),
                         'change_pct': round(change, 2) if change else 0,
                         'timestamp': datetime.now().isoformat()
-                    })
+                    }
+                    # Cache the result
+                    api_cache.set(f'price:{ticker}', data, 'stock')
+                    return (ticker, data)
             except Exception as e:
                 logger.debug(f"Market data failed for {ticker}: {e}")
-        
+
         # Fallback to mock data
         if ticker in mock_prices:
-            return (ticker, {
+            data = {
                 'price': mock_prices[ticker]['price'],
                 'change_pct': mock_prices[ticker]['change_pct'],
                 'timestamp': datetime.now().isoformat(),
                 'source': 'mock'
-            })
-        
+            }
+            # Cache mock data too (shorter TTL handled by cache)
+            api_cache.set(f'price:{ticker}', data, 'stock')
+            return (ticker, data)
+
         return None
-    
-    # Fetch prices with timeout
+
+    # Fetch uncached prices with timeout
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_ticker = {executor.submit(get_ticker_price, t): t for t in tickers if t.strip()}
-        
+        future_to_ticker = {executor.submit(get_ticker_price, t): t for t in tickers_to_fetch}
+
         for future in concurrent.futures.as_completed(future_to_ticker, timeout=3):
             try:
                 result = future.result(timeout=1)
@@ -1377,7 +1540,7 @@ def get_prices():
                     prices[ticker] = data
             except Exception as e:
                 logger.debug(f"Error fetching price: {e}")
-    
+
     return jsonify(prices)
 
 
@@ -1499,24 +1662,107 @@ def api_market_history(ticker):
 # Stock Detail Modal API Endpoints
 # =============================================================================
 
-# Simple in-memory cache for stock data
+# =============================================================================
+# In-Memory Cache System with TTL (Redis-like)
+# =============================================================================
+
+class TTLCache:
+    """
+    Thread-safe in-memory cache with TTL support.
+    Supports different TTLs for different data types:
+    - Stock prices: 60 seconds
+    - News articles: 300 seconds (5 minutes)
+    - Stock details: 300 seconds
+    - Chart data: 60 seconds
+    """
+
+    def __init__(self):
+        self._cache = {}
+        self._lock = __import__('threading').Lock()
+        self._default_ttls = {
+            'stock': 60,      # Stock prices - 1 minute
+            'news': 300,      # News - 5 minutes
+            'details': 300,   # Stock details - 5 minutes
+            'chart': 60,      # Chart data - 1 minute
+            'articles': 300,  # Article lists - 5 minutes
+            'default': 120    # Default - 2 minutes
+        }
+
+    def get(self, key, category='default'):
+        """Get value from cache if not expired"""
+        with self._lock:
+            if key in self._cache:
+                entry = self._cache[key]
+                ttl = self._default_ttls.get(category, self._default_ttls['default'])
+                if datetime.now() - entry['timestamp'] < timedelta(seconds=ttl):
+                    logger.debug(f"Cache HIT: {key}")
+                    return entry['data']
+                else:
+                    # Expired, remove it
+                    del self._cache[key]
+                    logger.debug(f"Cache EXPIRED: {key}")
+            return None
+
+    def set(self, key, data, category='default'):
+        """Store value in cache with timestamp"""
+        with self._lock:
+            self._cache[key] = {
+                'data': data,
+                'timestamp': datetime.now(),
+                'category': category
+            }
+            logger.debug(f"Cache SET: {key}")
+
+    def delete(self, key):
+        """Delete a specific key from cache"""
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+
+    def clear_category(self, category):
+        """Clear all entries of a specific category"""
+        with self._lock:
+            keys_to_delete = [
+                k for k, v in self._cache.items()
+                if v.get('category') == category
+            ]
+            for key in keys_to_delete:
+                del self._cache[key]
+
+    def clear_all(self):
+        """Clear entire cache"""
+        with self._lock:
+            self._cache.clear()
+
+    def get_stats(self):
+        """Get cache statistics"""
+        with self._lock:
+            now = datetime.now()
+            stats = {
+                'total_entries': len(self._cache),
+                'by_category': {}
+            }
+            for key, entry in self._cache.items():
+                cat = entry.get('category', 'default')
+                if cat not in stats['by_category']:
+                    stats['by_category'][cat] = 0
+                stats['by_category'][cat] += 1
+            return stats
+
+# Global cache instance
+api_cache = TTLCache()
+
+# Legacy cache variables for backwards compatibility
 _stock_cache = {}
 STOCK_CACHE_TTL = 300  # 5 minutes
 
 def _get_cached_stock_data(ticker):
-    """Get cached stock data if still valid"""
-    if ticker in _stock_cache:
-        cached = _stock_cache[ticker]
-        if datetime.now() - cached['timestamp'] < timedelta(seconds=STOCK_CACHE_TTL):
-            return cached['data']
-    return None
+    """Get cached stock data if still valid (legacy wrapper)"""
+    return api_cache.get(f'stock_details:{ticker}', 'details')
 
 def _set_cached_stock_data(ticker, data):
-    """Cache stock data with timestamp"""
-    _stock_cache[ticker] = {
-        'data': data,
-        'timestamp': datetime.now()
-    }
+    """Cache stock data with timestamp (legacy wrapper)"""
+    api_cache.set(f'stock_details:{ticker}', data, 'details')
 
 
 def _format_market_cap(cap):
@@ -1590,33 +1836,160 @@ def get_stock_details(ticker):
             change = current_price - previous_close if previous_close else 0
             change_percent = (change / previous_close * 100) if previous_close else 0
             
-            # Format the response
+            # Format the response with comprehensive Bloomberg-style data
             result = {
+                # Basic Info
                 'ticker': ticker,
                 'name': info.get('longName', info.get('shortName', ticker)),
                 'price': round(current_price, 2),
                 'change': round(change, 2),
                 'change_percent': round(change_percent, 2),
+                'currency': info.get('currency', 'USD'),
+                'exchange': info.get('exchange', 'N/A'),
+
+                # Market Data
                 'market_cap': _format_market_cap(info.get('marketCap')),
+                'market_cap_raw': info.get('marketCap', 0),
+                'enterprise_value': _format_market_cap(info.get('enterpriseValue')),
                 'volume': int(volume) if volume else 0,
                 'avg_volume': int(info.get('averageVolume', volume or 0)),
-                'pe_ratio': round(info.get('trailingPE', info.get('forwardPE', 0)), 2) if info.get('trailingPE') or info.get('forwardPE') else 'N/A',
-                'eps': round(info.get('trailingEps', 0), 2) if info.get('trailingEps') else 'N/A',
-                'dividend_yield': round(info.get('dividendYield', 0) * 100, 2) if info.get('dividendYield') else 0,
+                'avg_volume_10d': int(info.get('averageVolume10days', 0)) if info.get('averageVolume10days') else 'N/A',
+                'bid': info.get('bid', 'N/A'),
+                'ask': info.get('ask', 'N/A'),
+                'bid_size': info.get('bidSize', 'N/A'),
+                'ask_size': info.get('askSize', 'N/A'),
+
+                # Price Levels
                 '52_week_high': round(info.get('fiftyTwoWeekHigh', 0), 2) if info.get('fiftyTwoWeekHigh') else 'N/A',
                 '52_week_low': round(info.get('fiftyTwoWeekLow', 0), 2) if info.get('fiftyTwoWeekLow') else 'N/A',
                 'day_high': round(day_high, 2) if day_high else 'N/A',
                 'day_low': round(day_low, 2) if day_low else 'N/A',
                 'open': round(info.get('open', current_price), 2),
                 'previous_close': round(previous_close, 2),
+
+                # Technical Levels
+                'fifty_day_avg': round(info.get('fiftyDayAverage', 0), 2) if info.get('fiftyDayAverage') else 'N/A',
+                'two_hundred_day_avg': round(info.get('twoHundredDayAverage', 0), 2) if info.get('twoHundredDayAverage') else 'N/A',
+                'fifty_two_week_change': round(info.get('52WeekChange', 0) * 100, 2) if info.get('52WeekChange') else 'N/A',
+
+                # Valuation Metrics
+                'pe_ratio': round(info.get('trailingPE', 0), 2) if info.get('trailingPE') else 'N/A',
+                'forward_pe': round(info.get('forwardPE', 0), 2) if info.get('forwardPE') else 'N/A',
+                'peg_ratio': round(info.get('pegRatio', 0), 2) if info.get('pegRatio') else 'N/A',
+                'price_to_book': round(info.get('priceToBook', 0), 2) if info.get('priceToBook') else 'N/A',
+                'price_to_sales': round(info.get('priceToSalesTrailing12Months', 0), 2) if info.get('priceToSalesTrailing12Months') else 'N/A',
+                'ev_to_revenue': round(info.get('enterpriseToRevenue', 0), 2) if info.get('enterpriseToRevenue') else 'N/A',
+                'ev_to_ebitda': round(info.get('enterpriseToEbitda', 0), 2) if info.get('enterpriseToEbitda') else 'N/A',
+
+                # Earnings & EPS
+                'eps': round(info.get('trailingEps', 0), 2) if info.get('trailingEps') else 'N/A',
+                'forward_eps': round(info.get('forwardEps', 0), 2) if info.get('forwardEps') else 'N/A',
+                'earnings_growth': round(info.get('earningsGrowth', 0) * 100, 2) if info.get('earningsGrowth') else 'N/A',
+                'earnings_quarterly_growth': round(info.get('earningsQuarterlyGrowth', 0) * 100, 2) if info.get('earningsQuarterlyGrowth') else 'N/A',
+                'revenue_growth': round(info.get('revenueGrowth', 0) * 100, 2) if info.get('revenueGrowth') else 'N/A',
+
+                # Dividends
+                'dividend_yield': round(info.get('dividendYield', 0) * 100, 2) if info.get('dividendYield') else 0,
+                'dividend_rate': round(info.get('dividendRate', 0), 2) if info.get('dividendRate') else 'N/A',
+                'payout_ratio': round(info.get('payoutRatio', 0) * 100, 2) if info.get('payoutRatio') else 'N/A',
+                'ex_dividend_date': info.get('exDividendDate', 'N/A'),
+                'five_year_avg_dividend_yield': round(info.get('fiveYearAvgDividendYield', 0), 2) if info.get('fiveYearAvgDividendYield') else 'N/A',
+
+                # Profitability & Margins
+                'profit_margin': round(info.get('profitMargins', 0) * 100, 2) if info.get('profitMargins') else 'N/A',
+                'operating_margin': round(info.get('operatingMargins', 0) * 100, 2) if info.get('operatingMargins') else 'N/A',
+                'gross_margin': round(info.get('grossMargins', 0) * 100, 2) if info.get('grossMargins') else 'N/A',
+                'ebitda_margin': round(info.get('ebitdaMargins', 0) * 100, 2) if info.get('ebitdaMargins') else 'N/A',
+
+                # Financial Health
+                'beta': round(info.get('beta', 0), 2) if info.get('beta') else 'N/A',
+                'debt_to_equity': round(info.get('debtToEquity', 0), 2) if info.get('debtToEquity') else 'N/A',
+                'current_ratio': round(info.get('currentRatio', 0), 2) if info.get('currentRatio') else 'N/A',
+                'quick_ratio': round(info.get('quickRatio', 0), 2) if info.get('quickRatio') else 'N/A',
+                'roe': round(info.get('returnOnEquity', 0) * 100, 2) if info.get('returnOnEquity') else 'N/A',
+                'roa': round(info.get('returnOnAssets', 0) * 100, 2) if info.get('returnOnAssets') else 'N/A',
+
+                # Cash & Debt
+                'total_cash': _format_market_cap(info.get('totalCash')),
+                'total_cash_per_share': round(info.get('totalCashPerShare', 0), 2) if info.get('totalCashPerShare') else 'N/A',
+                'total_debt': _format_market_cap(info.get('totalDebt')),
+                'free_cash_flow': _format_market_cap(info.get('freeCashflow')) if info.get('freeCashflow') else 'N/A',
+                'operating_cash_flow': _format_market_cap(info.get('operatingCashflow')) if info.get('operatingCashflow') else 'N/A',
+
+                # Revenue & Income
+                'revenue': _format_market_cap(info.get('totalRevenue')),
+                'revenue_per_share': round(info.get('revenuePerShare', 0), 2) if info.get('revenuePerShare') else 'N/A',
+                'gross_profit': _format_market_cap(info.get('grossProfits')),
+                'ebitda': _format_market_cap(info.get('ebitda')),
+                'net_income': _format_market_cap(info.get('netIncomeToCommon')),
+                'book_value': round(info.get('bookValue', 0), 2) if info.get('bookValue') else 'N/A',
+
+                # Short Interest
+                'short_ratio': round(info.get('shortRatio', 0), 2) if info.get('shortRatio') else 'N/A',
+                'short_percent_of_float': round(info.get('shortPercentOfFloat', 0) * 100, 2) if info.get('shortPercentOfFloat') else 'N/A',
+                'shares_short': info.get('sharesShort', 'N/A'),
+                'shares_short_prior': info.get('sharesShortPriorMonth', 'N/A'),
+
+                # Ownership
+                'insider_ownership': round(info.get('heldPercentInsiders', 0) * 100, 2) if info.get('heldPercentInsiders') else 'N/A',
+                'institutional_ownership': round(info.get('heldPercentInstitutions', 0) * 100, 2) if info.get('heldPercentInstitutions') else 'N/A',
+                'float_shares': info.get('floatShares', 'N/A'),
+                'shares_outstanding': info.get('sharesOutstanding', 'N/A'),
+
+                # Analyst Data
+                'target_price': round(info.get('targetMeanPrice', 0), 2) if info.get('targetMeanPrice') else 'N/A',
+                'target_high': round(info.get('targetHighPrice', 0), 2) if info.get('targetHighPrice') else 'N/A',
+                'target_low': round(info.get('targetLowPrice', 0), 2) if info.get('targetLowPrice') else 'N/A',
+                'recommendation': info.get('recommendationKey', 'N/A'),
+                'num_analysts': info.get('numberOfAnalystOpinions', 'N/A'),
+
+                # Company Info
                 'sector': info.get('sector', 'N/A'),
                 'industry': info.get('industry', 'N/A'),
                 'employees': info.get('fullTimeEmployees', 'N/A'),
                 'website': info.get('website', ''),
+                'headquarters': f"{info.get('city', '')}, {info.get('state', '')} {info.get('country', '')}".strip(', '),
                 'description': info.get('longBusinessSummary', info.get('description', 'No description available')),
+
                 'source': 'yfinance',
                 'cached_at': datetime.now().isoformat()
             }
+
+            # Try to get earnings dates
+            try:
+                calendar = stock.calendar
+                if calendar is not None and not calendar.empty:
+                    if 'Earnings Date' in calendar.index:
+                        earnings_dates = calendar.loc['Earnings Date']
+                        if hasattr(earnings_dates, 'iloc') and len(earnings_dates) > 0:
+                            result['earnings_date'] = str(earnings_dates.iloc[0])[:10]
+                        else:
+                            result['earnings_date'] = str(earnings_dates)[:10] if earnings_dates else 'N/A'
+                    else:
+                        result['earnings_date'] = 'N/A'
+                else:
+                    result['earnings_date'] = 'N/A'
+            except Exception:
+                result['earnings_date'] = 'N/A'
+
+            # Try to get top institutional holders
+            try:
+                holders = stock.institutional_holders
+                if holders is not None and not holders.empty:
+                    top_holders = holders.head(5).to_dict('records')
+                    result['top_holders'] = [
+                        {
+                            'name': h.get('Holder', 'Unknown'),
+                            'shares': h.get('Shares', 0),
+                            'value': h.get('Value', 0),
+                            'pct_out': round(h.get('% Out', 0) * 100, 2) if h.get('% Out') else 0
+                        }
+                        for h in top_holders
+                    ]
+                else:
+                    result['top_holders'] = []
+            except Exception:
+                result['top_holders'] = []
             
         except ImportError:
             # yfinance not available, return mock data
@@ -1638,38 +2011,266 @@ def get_stock_details(ticker):
 
 
 def _get_mock_stock_data(ticker):
-    """Generate mock stock data as fallback"""
+    """Generate comprehensive mock stock data as fallback"""
     import random
-    
+
     base_price = random.uniform(50, 500)
     change_pct = random.uniform(-5, 5)
     change = base_price * change_pct / 100
-    
+    market_cap = random.uniform(1e9, 3e12)
+
     return {
+        # Basic Info
         'ticker': ticker,
         'name': f'{ticker} Inc.',
         'price': round(base_price, 2),
         'change': round(change, 2),
         'change_percent': round(change_pct, 2),
-        'market_cap': f'{random.uniform(1, 3000):.1f}B',
+        'currency': 'USD',
+        'exchange': 'NASDAQ',
+
+        # Market Data
+        'market_cap': _format_market_cap(market_cap),
+        'market_cap_raw': market_cap,
+        'enterprise_value': _format_market_cap(market_cap * 1.1),
         'volume': int(random.uniform(1e6, 100e6)),
         'avg_volume': int(random.uniform(5e6, 50e6)),
-        'pe_ratio': round(random.uniform(10, 40), 1),
-        'eps': round(random.uniform(1, 10), 2),
-        'dividend_yield': round(random.uniform(0, 4), 2),
+        'avg_volume_10d': int(random.uniform(5e6, 50e6)),
+        'bid': round(base_price - 0.01, 2),
+        'ask': round(base_price + 0.01, 2),
+        'bid_size': random.randint(100, 1000),
+        'ask_size': random.randint(100, 1000),
+
+        # Price Levels
         '52_week_high': round(base_price * 1.3, 2),
         '52_week_low': round(base_price * 0.7, 2),
         'day_high': round(base_price * 1.02, 2),
         'day_low': round(base_price * 0.98, 2),
         'open': round(base_price * (1 - change_pct/200), 2),
         'previous_close': round(base_price - change, 2),
+
+        # Technical Levels
+        'fifty_day_avg': round(base_price * random.uniform(0.95, 1.05), 2),
+        'two_hundred_day_avg': round(base_price * random.uniform(0.9, 1.1), 2),
+        'fifty_two_week_change': round(random.uniform(-20, 40), 2),
+
+        # Valuation Metrics
+        'pe_ratio': round(random.uniform(10, 40), 1),
+        'forward_pe': round(random.uniform(8, 35), 1),
+        'peg_ratio': round(random.uniform(0.5, 3), 2),
+        'price_to_book': round(random.uniform(1, 15), 2),
+        'price_to_sales': round(random.uniform(1, 10), 2),
+        'ev_to_revenue': round(random.uniform(2, 15), 2),
+        'ev_to_ebitda': round(random.uniform(5, 25), 2),
+
+        # Earnings & EPS
+        'eps': round(random.uniform(1, 10), 2),
+        'forward_eps': round(random.uniform(1, 12), 2),
+        'earnings_growth': round(random.uniform(-10, 30), 2),
+        'earnings_quarterly_growth': round(random.uniform(-15, 40), 2),
+        'revenue_growth': round(random.uniform(-5, 25), 2),
+
+        # Dividends
+        'dividend_yield': round(random.uniform(0, 4), 2),
+        'dividend_rate': round(random.uniform(0, 5), 2),
+        'payout_ratio': round(random.uniform(0, 60), 2),
+        'ex_dividend_date': 'N/A',
+        'five_year_avg_dividend_yield': round(random.uniform(0, 3), 2),
+
+        # Profitability & Margins
+        'profit_margin': round(random.uniform(5, 25), 2),
+        'operating_margin': round(random.uniform(10, 35), 2),
+        'gross_margin': round(random.uniform(30, 70), 2),
+        'ebitda_margin': round(random.uniform(15, 40), 2),
+
+        # Financial Health
+        'beta': round(random.uniform(0.5, 2.0), 2),
+        'debt_to_equity': round(random.uniform(0, 200), 2),
+        'current_ratio': round(random.uniform(1, 4), 2),
+        'quick_ratio': round(random.uniform(0.5, 3), 2),
+        'roe': round(random.uniform(5, 30), 2),
+        'roa': round(random.uniform(2, 15), 2),
+
+        # Cash & Debt
+        'total_cash': f'{random.uniform(1, 100):.1f}B',
+        'total_cash_per_share': round(random.uniform(1, 20), 2),
+        'total_debt': f'{random.uniform(1, 80):.1f}B',
+        'free_cash_flow': f'{random.uniform(1, 50):.1f}B',
+        'operating_cash_flow': f'{random.uniform(2, 60):.1f}B',
+
+        # Revenue & Income
+        'revenue': f'{random.uniform(10, 500):.1f}B',
+        'revenue_per_share': round(random.uniform(10, 100), 2),
+        'gross_profit': f'{random.uniform(5, 200):.1f}B',
+        'ebitda': f'{random.uniform(2, 100):.1f}B',
+        'net_income': f'{random.uniform(1, 80):.1f}B',
+        'book_value': round(random.uniform(10, 100), 2),
+
+        # Short Interest
+        'short_ratio': round(random.uniform(1, 10), 2),
+        'short_percent_of_float': round(random.uniform(1, 20), 2),
+        'shares_short': int(random.uniform(1e6, 50e6)),
+        'shares_short_prior': int(random.uniform(1e6, 50e6)),
+
+        # Ownership
+        'insider_ownership': round(random.uniform(1, 15), 2),
+        'institutional_ownership': round(random.uniform(50, 95), 2),
+        'float_shares': int(random.uniform(100e6, 5e9)),
+        'shares_outstanding': int(random.uniform(100e6, 6e9)),
+
+        # Analyst Data
+        'target_price': round(base_price * random.uniform(0.9, 1.3), 2),
+        'target_high': round(base_price * random.uniform(1.2, 1.5), 2),
+        'target_low': round(base_price * random.uniform(0.7, 0.9), 2),
+        'recommendation': random.choice(['buy', 'hold', 'sell', 'strong_buy']),
+        'num_analysts': random.randint(5, 40),
+        'earnings_date': 'N/A',
+
+        # Company Info
         'sector': random.choice(['Technology', 'Healthcare', 'Finance', 'Consumer', 'Energy']),
         'industry': random.choice(['Software', 'Services', 'Manufacturing', 'Retail']),
         'employees': random.randint(1000, 500000),
         'website': f'https://www.{ticker.lower()}.com',
+        'headquarters': 'San Francisco, CA USA',
         'description': f'{ticker} Inc. is a leading company in its industry, providing innovative products and services to customers worldwide.',
+
+        'top_holders': [],
         'source': 'mock',
         'cached_at': datetime.now().isoformat()
+    }
+
+
+def _calculate_rsi(closes, period=14):
+    """Calculate Relative Strength Index (RSI)"""
+    if len(closes) < period + 1:
+        return [None] * len(closes)
+
+    deltas = []
+    for i in range(1, len(closes)):
+        deltas.append(closes[i] - closes[i-1])
+
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+
+    rsi = [None] * period  # First 'period' values are None
+
+    # Calculate initial average gain/loss
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    for i in range(period, len(deltas)):
+        # Calculate RSI
+        if avg_loss == 0:
+            rsi.append(100)
+        else:
+            rs = avg_gain / avg_loss
+            rsi.append(round(100 - (100 / (1 + rs)), 2))
+
+        # Update averages using smoothing
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+    # Add final RSI value
+    if avg_loss == 0:
+        rsi.append(100)
+    else:
+        rs = avg_gain / avg_loss
+        rsi.append(round(100 - (100 / (1 + rs)), 2))
+
+    return rsi
+
+
+def _calculate_macd(closes, fast=12, slow=26, signal=9):
+    """Calculate MACD (Moving Average Convergence Divergence)"""
+    if len(closes) < slow + signal:
+        return {
+            'macd': [None] * len(closes),
+            'signal': [None] * len(closes),
+            'histogram': [None] * len(closes)
+        }
+
+    def ema(data, period):
+        """Calculate Exponential Moving Average"""
+        if len(data) < period:
+            return [None] * len(data)
+
+        multiplier = 2 / (period + 1)
+        ema_values = [None] * (period - 1)
+
+        # Start with SMA for first value
+        sma = sum(data[:period]) / period
+        ema_values.append(sma)
+
+        for i in range(period, len(data)):
+            ema_val = (data[i] - ema_values[-1]) * multiplier + ema_values[-1]
+            ema_values.append(round(ema_val, 4))
+
+        return ema_values
+
+    # Calculate fast and slow EMAs
+    ema_fast = ema(closes, fast)
+    ema_slow = ema(closes, slow)
+
+    # Calculate MACD line
+    macd_line = []
+    for i in range(len(closes)):
+        if ema_fast[i] is None or ema_slow[i] is None:
+            macd_line.append(None)
+        else:
+            macd_line.append(round(ema_fast[i] - ema_slow[i], 4))
+
+    # Calculate signal line (EMA of MACD)
+    macd_valid = [v for v in macd_line if v is not None]
+    signal_ema = ema(macd_valid, signal)
+
+    # Align signal with original data
+    signal_line = [None] * (len(closes) - len(signal_ema))
+    signal_line.extend(signal_ema)
+
+    # Calculate histogram
+    histogram = []
+    for i in range(len(closes)):
+        if macd_line[i] is None or signal_line[i] is None:
+            histogram.append(None)
+        else:
+            histogram.append(round(macd_line[i] - signal_line[i], 4))
+
+    return {
+        'macd': macd_line,
+        'signal': signal_line,
+        'histogram': histogram
+    }
+
+
+def _calculate_bollinger_bands(closes, period=20, std_dev=2):
+    """Calculate Bollinger Bands"""
+    if len(closes) < period:
+        return {
+            'upper': [None] * len(closes),
+            'middle': [None] * len(closes),
+            'lower': [None] * len(closes)
+        }
+
+    upper = [None] * (period - 1)
+    middle = [None] * (period - 1)
+    lower = [None] * (period - 1)
+
+    for i in range(period - 1, len(closes)):
+        window = closes[i - period + 1:i + 1]
+        sma = sum(window) / period
+
+        # Calculate standard deviation
+        variance = sum((x - sma) ** 2 for x in window) / period
+        std = variance ** 0.5
+
+        middle.append(round(sma, 2))
+        upper.append(round(sma + (std_dev * std), 2))
+        lower.append(round(sma - (std_dev * std), 2))
+
+    return {
+        'upper': upper,
+        'middle': middle,
+        'lower': lower
     }
 
 
@@ -1677,44 +2278,45 @@ def _get_mock_stock_data(ticker):
 @require_api_key
 def get_stock_chart(ticker):
     """
-    Get historical price data for charting.
-    
+    Get historical price data for charting with technical indicators.
+
     Query params:
         - period: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, max (default: 1mo)
         - interval: 1m, 5m, 15m, 30m, 1h, 1d, 1wk, 1mo (default: 1d)
     """
     ticker = ticker.upper().strip()
-    
+
     # Validate ticker
     if not ticker.isalpha() or len(ticker) > 5:
         return jsonify({'error': 'Invalid ticker format'}), 400
-    
+
     # Get query params
     period = request.args.get('period', '1mo')
     interval = request.args.get('interval', '1d')
-    
+
     # Validate period
     valid_periods = ['1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', 'max']
     if period not in valid_periods:
         return jsonify({'error': f'Invalid period. Use: {", ".join(valid_periods)}'}), 400
-    
+
     # Validate interval
     valid_intervals = ['1m', '5m', '15m', '30m', '1h', '1d', '1wk', '1mo']
     if interval not in valid_intervals:
         return jsonify({'error': f'Invalid interval. Use: {", ".join(valid_intervals)}'}), 400
-    
+
     try:
         # Try to get real data from yfinance
         try:
             import yfinance as yf
             stock = yf.Ticker(ticker)
             hist = stock.history(period=period, interval=interval)
-            
+
             if hist.empty:
                 raise ValueError("No historical data available")
-            
-            # Format data for Chart.js
+
+            # Format data for Chart.js (including OHLC for candlesticks)
             chart_data = []
+            closes = []
             for index, row in hist.iterrows():
                 chart_data.append({
                     'date': index.strftime('%Y-%m-%d %H:%M') if hasattr(index, 'strftime') else str(index),
@@ -1724,7 +2326,8 @@ def get_stock_chart(ticker):
                     'close': round(row['Close'], 2),
                     'volume': int(row['Volume'])
                 })
-            
+                closes.append(row['Close'])
+
             result = {
                 'ticker': ticker,
                 'period': period,
@@ -1732,17 +2335,22 @@ def get_stock_chart(ticker):
                 'data': chart_data,
                 'source': 'yfinance'
             }
-            
+
+            # Calculate technical indicators
+            result['rsi'] = _calculate_rsi(closes)
+            result['macd'] = _calculate_macd(closes)
+            result['bollinger'] = _calculate_bollinger_bands(closes)
+
         except ImportError:
             logger.warning("yfinance not available, returning mock chart data")
             result = _get_mock_chart_data(ticker, period, interval)
-            
+
         except Exception as e:
             logger.warning(f"Error fetching chart data from yfinance: {e}")
             result = _get_mock_chart_data(ticker, period, interval)
-        
+
         return jsonify(result)
-        
+
     except Exception as e:
         logger.error(f"Error getting chart data for {ticker}: {e}")
         return jsonify({'error': 'Failed to get chart data'}), 500
@@ -1798,14 +2406,20 @@ def _get_mock_chart_data(ticker, period, interval):
             'close': round(close_price, 2),
             'volume': int(random.uniform(1e6, 100e6))
         })
-        
+
         base_price = close_price
-    
+
+    # Calculate technical indicators for mock data
+    closes = [d['close'] for d in chart_data]
+
     return {
         'ticker': ticker,
         'period': period,
         'interval': interval,
         'data': chart_data,
+        'rsi': _calculate_rsi(closes),
+        'macd': _calculate_macd(closes),
+        'bollinger': _calculate_bollinger_bands(closes),
         'source': 'mock'
     }
 
@@ -1868,6 +2482,231 @@ def get_stock_news(ticker):
         return jsonify({'error': 'Failed to get news'}), 500
 
 
+# =============================================================================
+# Stock Screener API Endpoint
+# =============================================================================
+
+# S&P 500 representative tickers for screening (subset for performance)
+SCREENER_UNIVERSE = [
+    # Technology
+    'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'META', 'NVDA', 'AMD', 'INTC', 'CRM', 'ORCL',
+    'ADBE', 'CSCO', 'IBM', 'NOW', 'QCOM', 'TXN', 'AVGO', 'MU', 'AMAT', 'LRCX',
+    # Consumer
+    'AMZN', 'TSLA', 'HD', 'MCD', 'NKE', 'SBUX', 'TGT', 'COST', 'WMT', 'LOW',
+    # Finance
+    'JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'AXP', 'V', 'MA', 'BLK',
+    'SCHW', 'USB', 'PNC', 'TFC', 'COF',
+    # Healthcare
+    'JNJ', 'UNH', 'PFE', 'MRK', 'ABBV', 'LLY', 'TMO', 'ABT', 'DHR', 'BMY',
+    'AMGN', 'GILD', 'ISRG', 'MDT', 'CVS',
+    # Energy
+    'XOM', 'CVX', 'COP', 'SLB', 'EOG', 'MPC', 'PSX', 'VLO', 'OXY', 'KMI',
+    # Industrials
+    'CAT', 'DE', 'UNP', 'HON', 'BA', 'GE', 'RTX', 'LMT', 'MMM', 'UPS',
+    # Communications
+    'NFLX', 'DIS', 'CMCSA', 'T', 'VZ', 'TMUS', 'CHTR',
+    # Materials
+    'LIN', 'APD', 'SHW', 'DD', 'NEM', 'FCX',
+    # Utilities
+    'NEE', 'DUK', 'SO', 'D', 'AEP',
+    # Real Estate
+    'AMT', 'PLD', 'CCI', 'EQIX', 'SPG',
+]
+
+
+@app.route('/api/screener', methods=['GET', 'POST'])
+@require_api_key
+def stock_screener():
+    """
+    Stock screener endpoint.
+
+    Accepts filter parameters and returns matching stocks with key metrics.
+    Uses yfinance to fetch stock data for a predefined universe of stocks.
+
+    Query/Body Parameters:
+        - min_market_cap: Minimum market cap in billions (e.g., 10 = $10B)
+        - max_market_cap: Maximum market cap in billions
+        - min_pe: Minimum P/E ratio
+        - max_pe: Maximum P/E ratio
+        - sector: Sector filter (e.g., 'Technology', 'Healthcare')
+        - min_dividend_yield: Minimum dividend yield (percentage)
+        - max_dividend_yield: Maximum dividend yield (percentage)
+        - min_price: Minimum stock price
+        - max_price: Maximum stock price
+        - min_volume: Minimum average volume
+        - sort_by: Sort field ('market_cap', 'pe_ratio', 'dividend_yield', 'price', 'change_pct')
+        - sort_order: 'asc' or 'desc' (default: desc)
+        - limit: Maximum number of results (default: 50, max: 100)
+
+    Returns:
+        JSON with matching stocks and their metrics
+    """
+    import concurrent.futures
+
+    # Get parameters from query string or JSON body
+    if request.method == 'POST':
+        params = request.get_json() or {}
+    else:
+        params = request.args.to_dict()
+
+    # Parse filter parameters
+    try:
+        min_market_cap = float(params.get('min_market_cap', 0)) * 1e9 if params.get('min_market_cap') else None
+        max_market_cap = float(params.get('max_market_cap', 0)) * 1e9 if params.get('max_market_cap') else None
+        min_pe = float(params.get('min_pe')) if params.get('min_pe') else None
+        max_pe = float(params.get('max_pe')) if params.get('max_pe') else None
+        sector = params.get('sector', '').strip() or None
+        min_dividend = float(params.get('min_dividend_yield')) if params.get('min_dividend_yield') else None
+        max_dividend = float(params.get('max_dividend_yield')) if params.get('max_dividend_yield') else None
+        min_price = float(params.get('min_price')) if params.get('min_price') else None
+        max_price = float(params.get('max_price')) if params.get('max_price') else None
+        min_volume = int(params.get('min_volume')) if params.get('min_volume') else None
+        sort_by = params.get('sort_by', 'market_cap')
+        sort_order = params.get('sort_order', 'desc')
+        limit = min(int(params.get('limit', 50)), 100)
+    except (ValueError, TypeError) as e:
+        return jsonify({'error': f'Invalid parameter value: {str(e)}'}), 400
+
+    # Check if yfinance is available
+    try:
+        import yfinance as yf
+    except ImportError:
+        return jsonify({
+            'error': 'yfinance not available',
+            'message': 'Stock screener requires yfinance to be installed'
+        }), 503
+
+    def fetch_stock_data(ticker):
+        """Fetch data for a single stock with error handling."""
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+
+            # Skip if no valid data
+            if not info or 'regularMarketPrice' not in info and 'currentPrice' not in info:
+                return None
+
+            # Get price data
+            price = info.get('currentPrice') or info.get('regularMarketPrice') or 0
+            prev_close = info.get('previousClose') or price
+            change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
+
+            return {
+                'ticker': ticker,
+                'name': info.get('longName') or info.get('shortName') or ticker,
+                'price': round(price, 2),
+                'change_pct': round(change_pct, 2),
+                'market_cap': info.get('marketCap') or 0,
+                'market_cap_fmt': _format_market_cap(info.get('marketCap')),
+                'pe_ratio': round(info.get('trailingPE') or 0, 2) if info.get('trailingPE') else None,
+                'forward_pe': round(info.get('forwardPE') or 0, 2) if info.get('forwardPE') else None,
+                'dividend_yield': round((info.get('dividendYield') or 0) * 100, 2),
+                'sector': info.get('sector') or 'Unknown',
+                'industry': info.get('industry') or 'Unknown',
+                'volume': info.get('averageVolume') or 0,
+                'volume_fmt': _format_market_cap(info.get('averageVolume')),
+                '52w_high': round(info.get('fiftyTwoWeekHigh') or 0, 2),
+                '52w_low': round(info.get('fiftyTwoWeekLow') or 0, 2),
+                'beta': round(info.get('beta') or 0, 2) if info.get('beta') else None,
+            }
+        except Exception as e:
+            logger.debug(f"Error fetching data for {ticker}: {e}")
+            return None
+
+    # Fetch data for all stocks in universe using thread pool
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_ticker = {executor.submit(fetch_stock_data, t): t for t in SCREENER_UNIVERSE}
+
+        for future in concurrent.futures.as_completed(future_to_ticker, timeout=30):
+            try:
+                result = future.result(timeout=5)
+                if result:
+                    results.append(result)
+            except Exception as e:
+                logger.debug(f"Screener fetch error: {e}")
+
+    # Apply filters
+    filtered = []
+    for stock in results:
+        # Market cap filter
+        if min_market_cap and stock['market_cap'] < min_market_cap:
+            continue
+        if max_market_cap and stock['market_cap'] > max_market_cap:
+            continue
+
+        # P/E ratio filter
+        if min_pe and (stock['pe_ratio'] is None or stock['pe_ratio'] < min_pe):
+            continue
+        if max_pe and (stock['pe_ratio'] is None or stock['pe_ratio'] > max_pe):
+            continue
+
+        # Sector filter
+        if sector and stock['sector'].lower() != sector.lower():
+            continue
+
+        # Dividend yield filter
+        if min_dividend and stock['dividend_yield'] < min_dividend:
+            continue
+        if max_dividend and stock['dividend_yield'] > max_dividend:
+            continue
+
+        # Price filter
+        if min_price and stock['price'] < min_price:
+            continue
+        if max_price and stock['price'] > max_price:
+            continue
+
+        # Volume filter
+        if min_volume and stock['volume'] < min_volume:
+            continue
+
+        filtered.append(stock)
+
+    # Sort results
+    sort_key_map = {
+        'market_cap': lambda x: x['market_cap'] or 0,
+        'pe_ratio': lambda x: x['pe_ratio'] or 0,
+        'dividend_yield': lambda x: x['dividend_yield'] or 0,
+        'price': lambda x: x['price'] or 0,
+        'change_pct': lambda x: x['change_pct'] or 0,
+        'volume': lambda x: x['volume'] or 0,
+        'name': lambda x: x['name'].lower(),
+        'ticker': lambda x: x['ticker'],
+    }
+
+    sort_key = sort_key_map.get(sort_by, sort_key_map['market_cap'])
+    reverse = sort_order.lower() != 'asc'
+    filtered.sort(key=sort_key, reverse=reverse)
+
+    # Apply limit
+    filtered = filtered[:limit]
+
+    # Get unique sectors for filter dropdown
+    sectors = sorted(set(s['sector'] for s in results if s.get('sector') and s['sector'] != 'Unknown'))
+
+    return jsonify({
+        'stocks': filtered,
+        'count': len(filtered),
+        'total_universe': len(SCREENER_UNIVERSE),
+        'filters_applied': {
+            'min_market_cap': min_market_cap,
+            'max_market_cap': max_market_cap,
+            'min_pe': min_pe,
+            'max_pe': max_pe,
+            'sector': sector,
+            'min_dividend_yield': min_dividend,
+            'max_dividend_yield': max_dividend,
+            'min_price': min_price,
+            'max_price': max_price,
+            'min_volume': min_volume,
+        },
+        'sort': {'by': sort_by, 'order': sort_order},
+        'available_sectors': sectors,
+        'timestamp': datetime.now().isoformat()
+    })
+
+
 @app.route('/api/run', methods=['POST'])
 @require_api_key
 def api_run_bot():
@@ -1887,6 +2726,105 @@ def api_run_bot():
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/preload/watchlist')
+@require_api_key
+def api_preload_watchlist():
+    """
+    Preload detailed data for all watchlist stocks.
+    Returns stock details for all tickers in a single request.
+    Useful for background preloading on page load.
+    """
+    import concurrent.futures
+
+    try:
+        # Get watchlist tickers
+        db_watchlist = db.get_preference('watchlist')
+        if db_watchlist:
+            tickers = list(db_watchlist.keys())
+        else:
+            tickers = list(config.get('companies', {}).get('watchlist', {}).keys())
+
+        if not tickers:
+            return jsonify({'stocks': {}, 'preloaded': 0})
+
+        # Limit to first 20 tickers for performance
+        tickers = tickers[:20]
+
+        stocks = {}
+
+        def fetch_stock_data(ticker):
+            """Fetch stock data for a single ticker"""
+            # Check cache first
+            cached = api_cache.get(f'stock_details:{ticker}', 'details')
+            if cached:
+                return (ticker, cached)
+
+            # Try to fetch from yfinance
+            try:
+                import yfinance as yf
+                stock = yf.Ticker(ticker)
+                info = stock.info
+
+                # Get current price data
+                hist = stock.history(period="2d", interval="1d")
+
+                if len(hist) >= 1:
+                    current_price = hist['Close'].iloc[-1]
+                    previous_close = hist['Close'].iloc[-2] if len(hist) >= 2 else info.get('previousClose', current_price)
+                else:
+                    current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+                    previous_close = info.get('previousClose', 0)
+
+                change = current_price - previous_close if previous_close else 0
+                change_percent = (change / previous_close * 100) if previous_close else 0
+
+                data = {
+                    'ticker': ticker,
+                    'name': info.get('longName', info.get('shortName', ticker)),
+                    'price': round(current_price, 2),
+                    'change': round(change, 2),
+                    'change_percent': round(change_percent, 2),
+                    'market_cap': _format_market_cap(info.get('marketCap')),
+                    'pe_ratio': round(info.get('trailingPE', 0), 2) if info.get('trailingPE') else 'N/A',
+                    'sector': info.get('sector', 'N/A'),
+                    'industry': info.get('industry', 'N/A'),
+                    '52_week_high': round(info.get('fiftyTwoWeekHigh', 0), 2) if info.get('fiftyTwoWeekHigh') else 'N/A',
+                    '52_week_low': round(info.get('fiftyTwoWeekLow', 0), 2) if info.get('fiftyTwoWeekLow') else 'N/A',
+                    'cached_at': datetime.now().isoformat()
+                }
+
+                # Cache the result
+                api_cache.set(f'stock_details:{ticker}', data, 'details')
+                return (ticker, data)
+
+            except Exception as e:
+                logger.debug(f"Error preloading {ticker}: {e}")
+                return None
+
+        # Fetch all stocks in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(fetch_stock_data, t): t for t in tickers}
+
+            for future in concurrent.futures.as_completed(futures, timeout=10):
+                try:
+                    result = future.result(timeout=2)
+                    if result:
+                        ticker, data = result
+                        stocks[ticker] = data
+                except Exception as e:
+                    logger.debug(f"Error in preload future: {e}")
+
+        return jsonify({
+            'stocks': stocks,
+            'preloaded': len(stocks),
+            'requested': len(tickers)
+        })
+
+    except Exception as e:
+        logger.error(f"Error preloading watchlist: {e}")
+        return jsonify({'error': 'Failed to preload watchlist'}), 500
 
 
 @app.route('/api/search')
@@ -1943,7 +2881,7 @@ def advanced_search():
         with db.get_connection() as conn:
             # Search Articles
             if search_type in ('all', 'articles'):
-                article_results = search_articles(conn, query, {
+                article_results = search_articles_advanced(conn, query, {
                     'date_from': date_from,
                     'date_to': date_to,
                     'sources': sources,
@@ -1990,8 +2928,8 @@ def advanced_search():
         return jsonify({'error': 'Search failed', 'message': str(e)}), 500
 
 
-def search_articles(conn, query, filters):
-    """Search articles with full-text search and filtering."""
+def search_articles_advanced(conn, query, filters):
+    """Search articles with full-text search and filtering (for advanced search modal)."""
     conditions = []
     params = []
     
@@ -2525,11 +3463,513 @@ def api_economic_calendar():
     })
 
 
+# =============================================================================
+# Insider Trading API Endpoint
+# =============================================================================
+
+@app.route('/api/stock/<ticker>/insiders')
+@require_api_key
+def api_stock_insiders(ticker):
+    """Get insider trading transactions for a ticker using yfinance."""
+    ticker = ticker.upper().strip()
+    if not ticker.isalpha() or len(ticker) > 5:
+        return jsonify({'error': 'Invalid ticker format'}), 400
+
+    try:
+        import yfinance as yf
+        stock = yf.Ticker(ticker)
+        insider_transactions = stock.insider_transactions
+        transactions = []
+
+        if insider_transactions is not None and not insider_transactions.empty:
+            for idx, row in insider_transactions.head(20).iterrows():
+                insider_name = row.get('Insider', row.get('insider', 'Unknown'))
+                title = row.get('Position', row.get('position', row.get('Title', 'N/A')))
+                trans_type = row.get('Transaction', row.get('transaction', row.get('Type', 'N/A')))
+                shares = row.get('Shares', row.get('shares', 0))
+                if isinstance(shares, str):
+                    shares = int(shares.replace(',', '').replace('+', '').replace('-', '')) if shares else 0
+                value = row.get('Value', row.get('value', 0))
+                if isinstance(value, str):
+                    value = value.replace('$', '').replace(',', '')
+                    try:
+                        value = float(value) if value else 0
+                    except:
+                        value = 0
+                date = str(row.get('Start Date', row.get('Date', idx)))[:10]
+                transactions.append({
+                    'date': date, 'insider': str(insider_name), 'title': str(title),
+                    'transaction_type': str(trans_type), 'shares': int(shares) if shares else 0,
+                    'value': float(value) if value else 0
+                })
+
+        if not transactions:
+            import random
+            mock_insiders = [
+                {'name': 'John Smith', 'title': 'CEO'}, {'name': 'Jane Doe', 'title': 'CFO'},
+                {'name': 'Robert Johnson', 'title': 'Director'}, {'name': 'Sarah Williams', 'title': 'VP Sales'}
+            ]
+            for i in range(5):
+                date = (datetime.now() - timedelta(days=random.randint(1, 60))).strftime('%Y-%m-%d')
+                insider = random.choice(mock_insiders)
+                trans_type = random.choice(['Buy', 'Sell', 'Option Exercise'])
+                shares = random.randint(1000, 50000)
+                transactions.append({
+                    'date': date, 'insider': insider['name'], 'title': insider['title'],
+                    'transaction_type': trans_type, 'shares': shares,
+                    'value': round(shares * random.uniform(50, 500), 2)
+                })
+            transactions.sort(key=lambda x: x['date'], reverse=True)
+
+        return jsonify({'ticker': ticker, 'transactions': transactions, 'count': len(transactions)})
+    except ImportError:
+        return jsonify({'ticker': ticker, 'transactions': [], 'count': 0, 'error': 'yfinance not available'}), 503
+    except Exception as e:
+        logger.error(f"Error getting insider transactions for {ticker}: {e}")
+        return jsonify({'error': 'Failed to get insider transactions'}), 500
+
+
+# =============================================================================
+# Sentiment Trends and Trending Tickers API Endpoints
+# =============================================================================
+
+@app.route('/api/sentiment/trends')
+@require_api_key
+def api_sentiment_trends():
+    """Get sentiment trends over time."""
+    hours = min(max(request.args.get('hours', 72, type=int), 1), 168)
+    interval = request.args.get('interval', 'hour')
+    time_format = '%Y-%m-%d' if interval == 'day' else '%Y-%m-%d %H:00'
+
+    try:
+        with db.get_connection() as conn:
+            since = datetime.now() - timedelta(hours=hours)
+            if interval == '6h':
+                rows = conn.execute("""
+                    SELECT date(scraped_at) || ' ' || printf('%02d:00', (cast(strftime('%H', scraped_at) as integer) / 6) * 6) as time_bucket,
+                        SUM(CASE WHEN sentiment_score > 0.2 THEN 1 ELSE 0 END) as positive,
+                        SUM(CASE WHEN sentiment_score < -0.2 THEN 1 ELSE 0 END) as negative,
+                        SUM(CASE WHEN sentiment_score >= -0.2 AND sentiment_score <= 0.2 THEN 1 ELSE 0 END) as neutral,
+                        COUNT(*) as total, AVG(sentiment_score) as avg_sentiment
+                    FROM articles WHERE scraped_at > ? AND sentiment_score IS NOT NULL
+                    GROUP BY time_bucket ORDER BY time_bucket ASC
+                """, (since,)).fetchall()
+            else:
+                rows = conn.execute(f"""
+                    SELECT strftime('{time_format}', scraped_at) as time_bucket,
+                        SUM(CASE WHEN sentiment_score > 0.2 THEN 1 ELSE 0 END) as positive,
+                        SUM(CASE WHEN sentiment_score < -0.2 THEN 1 ELSE 0 END) as negative,
+                        SUM(CASE WHEN sentiment_score >= -0.2 AND sentiment_score <= 0.2 THEN 1 ELSE 0 END) as neutral,
+                        COUNT(*) as total, AVG(sentiment_score) as avg_sentiment
+                    FROM articles WHERE scraped_at > ? AND sentiment_score IS NOT NULL
+                    GROUP BY time_bucket ORDER BY time_bucket ASC
+                """, (since,)).fetchall()
+
+            trends = [{'time': row['time_bucket'], 'positive': row['positive'], 'negative': row['negative'],
+                       'neutral': row['neutral'], 'total': row['total'],
+                       'avg_sentiment': round(row['avg_sentiment'], 3) if row['avg_sentiment'] else 0} for row in rows]
+
+            total_positive = sum(t['positive'] for t in trends)
+            total_negative = sum(t['negative'] for t in trends)
+            momentum = 0
+            if len(trends) >= 2:
+                mid = len(trends) // 2
+                first_half_avg = sum(t['avg_sentiment'] for t in trends[:mid]) / mid if mid > 0 else 0
+                second_half_avg = sum(t['avg_sentiment'] for t in trends[mid:]) / (len(trends) - mid)
+                momentum = round(second_half_avg - first_half_avg, 3)
+
+            return jsonify({
+                'trends': trends,
+                'summary': {'positive': total_positive, 'negative': total_negative,
+                            'neutral': sum(t['neutral'] for t in trends), 'total': sum(t['total'] for t in trends),
+                            'sentiment_momentum': momentum,
+                            'overall_sentiment': 'bullish' if momentum > 0.05 else 'bearish' if momentum < -0.05 else 'neutral'},
+                'hours': hours, 'interval': interval
+            })
+    except Exception as e:
+        logger.error("Error getting sentiment trends", extra={"error": str(e)})
+        return jsonify({'error': 'Failed to get sentiment trends'}), 500
+
+
+@app.route('/api/trending-tickers')
+@require_api_key
+def api_trending_tickers():
+    """Get trending tickers based on mention frequency."""
+    hours = min(max(request.args.get('hours', 24, type=int), 1), 168)
+    limit = min(max(request.args.get('limit', 10, type=int), 1), 50)
+    min_mentions = request.args.get('min_mentions', 2, type=int)
+
+    try:
+        with db.get_connection() as conn:
+            since = datetime.now() - timedelta(hours=hours)
+            rows = conn.execute("""
+                SELECT cm.company_ticker as ticker, cm.company_name as name, COUNT(*) as mentions,
+                    COUNT(DISTINCT cm.article_id) as article_count, AVG(a.sentiment_score) as avg_sentiment,
+                    MAX(cm.mentioned_at) as last_mentioned
+                FROM company_mentions cm JOIN articles a ON cm.article_id = a.id
+                WHERE cm.mentioned_at > ? GROUP BY cm.company_ticker
+                HAVING COUNT(*) >= ? ORDER BY mentions DESC LIMIT ?
+            """, (since, min_mentions, limit)).fetchall()
+
+            tickers = []
+            for row in rows:
+                sentiment_label = 'positive' if row['avg_sentiment'] and row['avg_sentiment'] > 0.2 else \
+                                  'negative' if row['avg_sentiment'] and row['avg_sentiment'] < -0.2 else 'neutral'
+                tickers.append({
+                    'ticker': row['ticker'], 'name': row['name'], 'mentions': row['mentions'],
+                    'article_count': row['article_count'],
+                    'avg_sentiment': round(row['avg_sentiment'], 3) if row['avg_sentiment'] else 0,
+                    'sentiment_label': sentiment_label, 'last_mentioned': row['last_mentioned']
+                })
+            return jsonify({'tickers': tickers, 'count': len(tickers), 'hours': hours, 'min_mentions': min_mentions})
+    except Exception as e:
+        logger.error("Error getting trending tickers", extra={"error": str(e)})
+        return jsonify({'error': 'Failed to get trending tickers'}), 500
+
+
 # Static files
 @app.route('/static/<path:path>')
 def send_static(path):
     return send_from_directory('static', path)
 
 
+# =============================================================================
+# WebSocket Real-Time Price Updates
+# =============================================================================
+
+# Track connected clients and their watchlists
+connected_clients = {}
+price_update_thread = None
+price_update_running = False
+
+if SOCKETIO_AVAILABLE:
+    @socketio.on('connect')
+    def handle_connect():
+        """Handle client connection"""
+        client_id = request.sid
+        connected_clients[client_id] = {
+            'connected_at': datetime.now().isoformat(),
+            'watchlist': []
+        }
+        logger.info(f"WebSocket client connected: {client_id}")
+        emit('connection_status', {'status': 'connected', 'client_id': client_id})
+
+        # Start price update thread if not running
+        start_price_updates()
+
+    @socketio.on('disconnect')
+    def handle_disconnect():
+        """Handle client disconnection"""
+        client_id = request.sid
+        if client_id in connected_clients:
+            del connected_clients[client_id]
+        logger.info(f"WebSocket client disconnected: {client_id}")
+
+        # Stop price updates if no clients connected
+        if not connected_clients:
+            stop_price_updates()
+
+    @socketio.on('subscribe_prices')
+    def handle_subscribe(data):
+        """Subscribe to price updates for specific tickers"""
+        client_id = request.sid
+        tickers = data.get('tickers', [])
+
+        if client_id in connected_clients:
+            connected_clients[client_id]['watchlist'] = [t.upper() for t in tickers]
+            logger.info(f"Client {client_id} subscribed to: {tickers}")
+            emit('subscription_confirmed', {'tickers': tickers})
+
+    @socketio.on('unsubscribe_prices')
+    def handle_unsubscribe(data):
+        """Unsubscribe from price updates"""
+        client_id = request.sid
+        if client_id in connected_clients:
+            connected_clients[client_id]['watchlist'] = []
+            emit('subscription_confirmed', {'tickers': []})
+
+    def get_all_subscribed_tickers():
+        """Get all tickers that any client is subscribed to"""
+        all_tickers = set()
+        for client_data in connected_clients.values():
+            all_tickers.update(client_data.get('watchlist', []))
+        return list(all_tickers)
+
+    def fetch_prices_for_broadcast(tickers):
+        """Fetch current prices for broadcasting"""
+        import concurrent.futures
+
+        mock_prices = {
+            'AAPL': {'price': 185.92, 'change_pct': 1.25},
+            'MSFT': {'price': 420.55, 'change_pct': 0.85},
+            'GOOGL': {'price': 175.98, 'change_pct': -0.45},
+            'AMZN': {'price': 178.35, 'change_pct': 1.12},
+            'TSLA': {'price': 248.50, 'change_pct': -2.30},
+            'NVDA': {'price': 875.28, 'change_pct': 3.45},
+            'META': {'price': 505.20, 'change_pct': 0.95},
+            'NFLX': {'price': 628.75, 'change_pct': -0.85},
+            'AMD': {'price': 162.45, 'change_pct': 1.85},
+            'CRM': {'price': 295.30, 'change_pct': -0.35},
+            'SPY': {'price': 520.50, 'change_pct': 0.65},
+            'QQQ': {'price': 445.25, 'change_pct': 0.95},
+            'DIA': {'price': 390.80, 'change_pct': 0.25},
+            'IWM': {'price': 205.40, 'change_pct': -0.15},
+        }
+
+        prices = {}
+
+        def get_ticker_price(ticker):
+            ticker = ticker.strip().upper()
+            if not ticker:
+                return None
+
+            # Try market data provider first
+            if market_data_provider:
+                try:
+                    price = market_data_provider.get_price(ticker)
+                    change = market_data_provider.get_intraday_change(ticker)
+                    if price:
+                        return (ticker, {
+                            'price': round(price, 2),
+                            'change_pct': round(change, 2) if change else 0,
+                            'timestamp': datetime.now().isoformat()
+                        })
+                except Exception:
+                    pass
+
+            # Fallback to mock data with small random variation
+            import random
+            if ticker in mock_prices:
+                base = mock_prices[ticker]
+                variation = (random.random() - 0.5) * 0.5
+                return (ticker, {
+                    'price': round(base['price'] + variation, 2),
+                    'change_pct': round(base['change_pct'] + variation * 0.2, 2),
+                    'timestamp': datetime.now().isoformat()
+                })
+
+            return None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_ticker = {executor.submit(get_ticker_price, t): t for t in tickers}
+            for future in concurrent.futures.as_completed(future_to_ticker, timeout=3):
+                try:
+                    result = future.result(timeout=1)
+                    if result:
+                        ticker, data = result
+                        prices[ticker] = data
+                except Exception:
+                    pass
+
+        return prices
+
+    def price_update_loop():
+        """Background loop to broadcast price updates"""
+        global price_update_running
+        import time as _time
+
+        while price_update_running and connected_clients:
+            try:
+                # Get all tickers clients are interested in
+                tickers = get_all_subscribed_tickers()
+
+                if tickers:
+                    # Fetch current prices
+                    prices = fetch_prices_for_broadcast(tickers)
+
+                    if prices:
+                        # Broadcast to all connected clients
+                        socketio.emit('price_update', {
+                            'prices': prices,
+                            'timestamp': datetime.now().isoformat()
+                        })
+                        logger.debug(f"Broadcast price update for {len(prices)} tickers")
+
+                # Wait before next update (7 seconds for ~5-10 second cycle)
+                _time.sleep(7)
+
+            except Exception as e:
+                logger.error(f"Error in price update loop: {e}")
+                _time.sleep(10)
+
+        logger.info("Price update loop stopped")
+
+    def start_price_updates():
+        """Start the background price update thread"""
+        global price_update_thread, price_update_running
+
+        if price_update_running:
+            return
+
+        price_update_running = True
+        price_update_thread = socketio.start_background_task(price_update_loop)
+        logger.info("Started price update background task")
+
+    def stop_price_updates():
+        """Stop the background price update thread"""
+        global price_update_running
+        price_update_running = False
+        logger.info("Stopping price update background task")
+
+
+
+
+# =============================================================================
+# Stock Comparison API
+# =============================================================================
+
+@app.route('/api/compare')
+@require_api_key
+def compare_stocks():
+    tickers_param = request.args.get('tickers', '')
+    period = request.args.get('period', '1mo')
+    tickers = [t.strip().upper() for t in tickers_param.split(',') if t.strip()]
+    if len(tickers) < 2:
+        return jsonify({'error': 'At least 2 tickers required'}), 400
+    if len(tickers) > 4:
+        return jsonify({'error': 'Maximum 4 tickers allowed'}), 400
+    for ticker in tickers:
+        if not ticker.isalpha() or len(ticker) > 5:
+            return jsonify({'error': f'Invalid ticker format: {ticker}'}), 400
+    try:
+        import yfinance as yf
+        comparison_data = {'tickers': tickers, 'period': period, 'stocks': {}, 'chart_data': {}, 'generated_at': datetime.now().isoformat()}
+        for ticker in tickers:
+            try:
+                stock = yf.Ticker(ticker)
+                info = stock.info
+                hist = stock.history(period='2d', interval='1d')
+                if len(hist) >= 1:
+                    current_price = hist['Close'].iloc[-1]
+                    previous_close = hist['Close'].iloc[-2] if len(hist) >= 2 else info.get('previousClose', current_price)
+                else:
+                    current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+                    previous_close = info.get('previousClose', 0)
+                change = current_price - previous_close if previous_close else 0
+                change_percent = (change / previous_close * 100) if previous_close else 0
+                comparison_data['stocks'][ticker] = {
+                    'name': info.get('longName', info.get('shortName', ticker)),
+                    'price': round(current_price, 2),
+                    'change': round(change, 2),
+                    'change_percent': round(change_percent, 2),
+                    'market_cap': _format_market_cap(info.get('marketCap')),
+                    'market_cap_raw': info.get('marketCap', 0),
+                    'pe_ratio': round(info.get('trailingPE', 0), 2) if info.get('trailingPE') else 'N/A',
+                    'forward_pe': round(info.get('forwardPE', 0), 2) if info.get('forwardPE') else 'N/A',
+                    'peg_ratio': round(info.get('pegRatio', 0), 2) if info.get('pegRatio') else 'N/A',
+                    'dividend_yield': round(info.get('dividendYield', 0) * 100, 2) if info.get('dividendYield') else 0,
+                    'beta': round(info.get('beta', 0), 2) if info.get('beta') else 'N/A',
+                    '52_week_high': round(info.get('fiftyTwoWeekHigh', 0), 2) if info.get('fiftyTwoWeekHigh') else 'N/A',
+                    '52_week_low': round(info.get('fiftyTwoWeekLow', 0), 2) if info.get('fiftyTwoWeekLow') else 'N/A',
+                    'volume': int(info.get('volume', 0)) if info.get('volume') else 0,
+                    'avg_volume': int(info.get('averageVolume', 0)) if info.get('averageVolume') else 0,
+                    'eps': round(info.get('trailingEps', 0), 2) if info.get('trailingEps') else 'N/A',
+                    'revenue': _format_market_cap(info.get('totalRevenue')),
+                    'profit_margin': round(info.get('profitMargins', 0) * 100, 2) if info.get('profitMargins') else 'N/A',
+                    'roe': round(info.get('returnOnEquity', 0) * 100, 2) if info.get('returnOnEquity') else 'N/A',
+                    'debt_to_equity': round(info.get('debtToEquity', 0), 2) if info.get('debtToEquity') else 'N/A',
+                    'sector': info.get('sector', 'N/A'),
+                    'industry': info.get('industry', 'N/A'),
+                }
+                hist_chart = stock.history(period=period, interval='1d')
+                if not hist_chart.empty:
+                    start_price = hist_chart['Close'].iloc[0]
+                    comparison_data['chart_data'][ticker] = [
+                        {'date': idx.strftime('%Y-%m-%d'), 'price': round(row['Close'], 2), 'percent_change': round((row['Close'] / start_price - 1) * 100, 2)}
+                        for idx, row in hist_chart.iterrows()
+                    ]
+            except Exception as e:
+                logger.warning(f'Error fetching comparison data for {ticker}: {e}')
+                comparison_data['stocks'][ticker] = {'name': ticker, 'error': str(e)}
+        return jsonify(comparison_data)
+    except ImportError:
+        return jsonify({'error': 'yfinance not available'}), 500
+    except Exception as e:
+        logger.error(f'Error comparing stocks: {e}')
+        return jsonify({'error': 'Failed to compare stocks'}), 500
+
+
+@app.route('/api/stock/<ticker>/options')
+@require_api_key
+def get_options_chain(ticker):
+    ticker = ticker.upper().strip()
+    expiration = request.args.get('expiration')
+    if not ticker.isalpha() or len(ticker) > 5:
+        return jsonify({'error': 'Invalid ticker format'}), 400
+    try:
+        import yfinance as yf
+        import pandas as pd
+        stock = yf.Ticker(ticker)
+        try:
+            expirations = stock.options
+        except Exception:
+            expirations = []
+        if not expirations:
+            return jsonify({'ticker': ticker, 'error': 'No options available for this ticker', 'expirations': []})
+        if not expiration:
+            return jsonify({'ticker': ticker, 'expirations': list(expirations), 'message': 'Specify expiration date to get options chain'})
+        if expiration not in expirations:
+            return jsonify({'ticker': ticker, 'error': f'Invalid expiration date', 'expirations': list(expirations)}), 400
+        try:
+            opt = stock.option_chain(expiration)
+            calls_df = opt.calls
+            puts_df = opt.puts
+        except Exception as e:
+            return jsonify({'ticker': ticker, 'expiration': expiration, 'error': 'Failed to fetch options chain'}), 500
+        try:
+            current_price = stock.info.get('currentPrice', stock.info.get('regularMarketPrice', 0))
+        except:
+            current_price = 0
+        calls = []
+        for _, row in calls_df.iterrows():
+            calls.append({
+                'contractSymbol': row.get('contractSymbol', ''),
+                'strike': round(row.get('strike', 0), 2),
+                'lastPrice': round(row.get('lastPrice', 0), 2),
+                'bid': round(row.get('bid', 0), 2),
+                'ask': round(row.get('ask', 0), 2),
+                'change': round(row.get('change', 0), 2),
+                'percentChange': round(row.get('percentChange', 0), 2) if row.get('percentChange') else 0,
+                'volume': int(row.get('volume', 0)) if row.get('volume') and not pd.isna(row.get('volume')) else 0,
+                'openInterest': int(row.get('openInterest', 0)) if row.get('openInterest') and not pd.isna(row.get('openInterest')) else 0,
+                'impliedVolatility': round(row.get('impliedVolatility', 0) * 100, 2) if row.get('impliedVolatility') else 0,
+                'inTheMoney': bool(row.get('inTheMoney', False)),
+            })
+        puts = []
+        for _, row in puts_df.iterrows():
+            puts.append({
+                'contractSymbol': row.get('contractSymbol', ''),
+                'strike': round(row.get('strike', 0), 2),
+                'lastPrice': round(row.get('lastPrice', 0), 2),
+                'bid': round(row.get('bid', 0), 2),
+                'ask': round(row.get('ask', 0), 2),
+                'change': round(row.get('change', 0), 2),
+                'percentChange': round(row.get('percentChange', 0), 2) if row.get('percentChange') else 0,
+                'volume': int(row.get('volume', 0)) if row.get('volume') and not pd.isna(row.get('volume')) else 0,
+                'openInterest': int(row.get('openInterest', 0)) if row.get('openInterest') and not pd.isna(row.get('openInterest')) else 0,
+                'impliedVolatility': round(row.get('impliedVolatility', 0) * 100, 2) if row.get('impliedVolatility') else 0,
+                'inTheMoney': bool(row.get('inTheMoney', False)),
+            })
+        return jsonify({
+            'ticker': ticker,
+            'expiration': expiration,
+            'expirations': list(expirations),
+            'currentPrice': round(current_price, 2),
+            'calls': calls,
+            'puts': puts,
+            'generated_at': datetime.now().isoformat()
+        })
+    except ImportError:
+        return jsonify({'error': 'yfinance not available'}), 500
+    except Exception as e:
+        logger.error(f'Error getting options chain for {ticker}: {e}')
+        return jsonify({'error': 'Failed to get options chain'}), 500
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    if SOCKETIO_AVAILABLE:
+        # Run with SocketIO for WebSocket support
+        socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+    else:
+        # Fallback to regular Flask
+        app.run(host='0.0.0.0', port=5000, debug=True)

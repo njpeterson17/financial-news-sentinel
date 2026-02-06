@@ -1726,16 +1726,264 @@ body {
         flex-direction: row;
         padding: 10px 0;
     }
-    
+
     .stats-grid {
         grid-template-columns: repeat(4, 1fr);
     }
-    
+
     .stat-card {
         padding: 12px;
     }
-    
+
     .alerts-list {
         max-height: 200px;
+    }
+}
+
+/* =============================================================================
+   Performance Optimizations - Loading States
+   ============================================================================= */
+
+/* Tab loading spinner */
+.tab-loading-spinner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 20px;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.tab-loading-spinner i {
+    color: var(--accent-primary);
+}
+
+/* Stock modal partial loading state */
+.stock-modal-content .loading-field {
+    display: inline-block;
+    width: 60px;
+    height: 16px;
+    background: linear-gradient(90deg, var(--bg-secondary) 25%, var(--bg-card) 50%, var(--bg-secondary) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 4px;
+}
+
+@keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* Preloaded indicator */
+.preloaded-badge {
+    font-size: 10px;
+    background: var(--accent-success);
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 8px;
+    opacity: 0.8;
+}
+
+/* Loading indicator for articles */
+.loading-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 40px;
+    color: var(--text-secondary);
+}
+
+.loading-indicator i {
+    color: var(--accent-primary);
+    font-size: 18px;
+}
+
+/* Articles loading more indicator */
+.articles-loading-more {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 15px;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+/* Search debounce visual feedback */
+.search-input.searching {
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+/* Cache stats indicator (for debugging) */
+.cache-indicator {
+    position: fixed;
+    bottom: 10px;
+    right: 10px;
+    background: rgba(0, 0, 0, 0.8);
+    color: var(--text-secondary);
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-family: monospace;
+    z-index: 1000;
+    display: none; /* Enable with developer tools */
+}
+
+/* =============================================================================
+   WebSocket Real-Time Price Updates
+   ============================================================================= */
+
+/* Price flash animations */
+@keyframes priceFlashUp {
+    0% {
+        background-color: rgba(16, 185, 129, 0.5);
+        transform: scale(1.02);
+    }
+    100% {
+        background-color: transparent;
+        transform: scale(1);
+    }
+}
+
+@keyframes priceFlashDown {
+    0% {
+        background-color: rgba(239, 68, 68, 0.5);
+        transform: scale(1.02);
+    }
+    100% {
+        background-color: transparent;
+        transform: scale(1);
+    }
+}
+
+.price-flash-up {
+    animation: priceFlashUp 0.6s ease-out;
+}
+
+.price-flash-down {
+    animation: priceFlashDown 0.6s ease-out;
+}
+
+/* Connection status indicator */
+.ws-connection-status {
+    position: fixed;
+    bottom: 20px;
+    left: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    z-index: 1000;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+}
+
+.ws-connection-status i {
+    font-size: 12px;
+}
+
+.ws-connection-status.connected {
+    background: rgba(16, 185, 129, 0.2);
+    color: var(--accent-success);
+    border: 1px solid var(--accent-success);
+}
+
+.ws-connection-status.connected::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    background: var(--accent-success);
+    border-radius: 50%;
+    animation: pulse 2s infinite;
+}
+
+.ws-connection-status.disconnected {
+    background: rgba(239, 68, 68, 0.2);
+    color: var(--accent-danger);
+    border: 1px solid var(--accent-danger);
+}
+
+.ws-connection-status.reconnecting {
+    background: rgba(245, 158, 11, 0.2);
+    color: var(--accent-warning);
+    border: 1px solid var(--accent-warning);
+}
+
+.ws-connection-status.error {
+    background: rgba(239, 68, 68, 0.2);
+    color: var(--accent-danger);
+    border: 1px solid var(--accent-danger);
+}
+
+.ws-connection-status.polling {
+    background: rgba(148, 163, 184, 0.2);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+
+/* Minimized state for connected status */
+.ws-connection-status.minimized {
+    padding: 6px 10px;
+    opacity: 0.7;
+}
+
+.ws-connection-status.minimized span {
+    display: none;
+}
+
+.ws-connection-status.minimized:hover {
+    opacity: 1;
+    padding: 8px 14px;
+}
+
+.ws-connection-status.minimized:hover span {
+    display: inline;
+}
+
+/* Enhanced price display for real-time updates */
+.company-price,
+.market-price,
+.stock-price {
+    transition: background-color 0.3s ease;
+}
+
+/* Market indices real-time updates */
+.market-item .market-price.price-flash-up,
+.market-item .market-change.price-flash-up {
+    animation: priceFlashUp 0.6s ease-out;
+}
+
+.market-item .market-price.price-flash-down,
+.market-item .market-change.price-flash-down {
+    animation: priceFlashDown 0.6s ease-out;
+}
+
+/* Stock ticker tape real-time updates */
+.stock-ticker-item .stock-price.price-flash-up {
+    animation: priceFlashUp 0.6s ease-out;
+}
+
+.stock-ticker-item .stock-price.price-flash-down {
+    animation: priceFlashDown 0.6s ease-out;
+}
+
+/* Mobile responsive for connection indicator */
+@media (max-width: 768px) {
+    .ws-connection-status {
+        bottom: 70px;
+        left: 10px;
+        padding: 6px 10px;
+        font-size: 11px;
+    }
+
+    .ws-connection-status.minimized {
+        padding: 4px 8px;
     }
 }

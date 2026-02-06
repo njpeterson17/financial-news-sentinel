@@ -17,6 +17,107 @@ let currentChartType = 'mentions';
 let priceCache = {};
 const PRICE_CACHE_TTL = 60000; // 1 minute
 
+// =============================================================================
+// Preload Cache for Watchlist Data
+// =============================================================================
+let preloadedStockData = {};
+let preloadInProgress = false;
+
+// =============================================================================
+// Lazy Loading State for Stock Modal Tabs
+// =============================================================================
+const tabLoadState = {
+    overview: false,
+    valuation: false,
+    financials: false,
+    ownership: false,
+    analysts: false,
+    news: false,
+    chart: false
+};
+
+// Current stock data for lazy loading
+let currentStockData = null;
+
+// =============================================================================
+// Search Debounce
+// =============================================================================
+let searchDebounceTimer = null;
+const SEARCH_DEBOUNCE_MS = 300;
+
+// =============================================================================
+// Web Worker for Background Preloading
+// =============================================================================
+let preloadWorker = null;
+
+/**
+ * Initialize the Web Worker for background data fetching
+ */
+function initPreloadWorker() {
+    if (typeof Worker === 'undefined') {
+        console.warn('[Worker] Web Workers not supported, using fallback');
+        return false;
+    }
+
+    try {
+        preloadWorker = new Worker('/static/js/preload-worker.js');
+
+        preloadWorker.onmessage = function(e) {
+            const { type, data } = e.data;
+
+            switch (type) {
+                case 'preload_complete':
+                    console.log('[Worker] Preload complete');
+                    preloadedStockData = { ...preloadedStockData, ...data };
+                    preloadInProgress = false;
+                    break;
+
+                case 'price_update':
+                    // Update price cache with worker data
+                    if (data.price) {
+                        priceCache[data.ticker] = data.price;
+                    }
+                    break;
+
+                case 'batch_prices':
+                    // Update multiple prices from worker
+                    Object.assign(priceCache, data);
+                    updatePriceDisplay(data);
+                    break;
+
+                case 'batch_error':
+                case 'price_error':
+                    console.warn('[Worker] Price fetch error:', data.error);
+                    break;
+            }
+        };
+
+        preloadWorker.onerror = function(error) {
+            console.error('[Worker] Error:', error);
+        };
+
+        console.log('[Worker] Preload worker initialized');
+        return true;
+    } catch (error) {
+        console.warn('[Worker] Failed to initialize:', error);
+        return false;
+    }
+}
+
+/**
+ * Use Web Worker to preload data if available, otherwise use fallback
+ */
+function preloadViaWorker(tickers) {
+    if (preloadWorker) {
+        preloadWorker.postMessage({
+            type: 'preload',
+            data: { tickers }
+        });
+        return true;
+    }
+    return false;
+}
+
 // Settings state
 let settingsState = {
     watchlist: {},
@@ -30,30 +131,57 @@ let settingsState = {
 // Debounce timer for auto-save
 let saveDebounceTimer = null;
 
+// =============================================================================
+// WebSocket Real-Time Price Updates
+// =============================================================================
+let socket = null;
+let wsConnected = false;
+let wsReconnectAttempts = 0;
+const WS_MAX_RECONNECT_ATTEMPTS = 5;
+const WS_RECONNECT_DELAY = 3000;
+let subscribedTickers = [];
+let previousPrices = {}; // Track previous prices for flash animation
+
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', () => {
     // Hide any chart elements (replaced with ticker)
     hideChartElements();
-    
+
     initDashboard();
     setupEventListeners();
     setupSettingsEventListeners();
     initTicker();
     initMobileFeatures();
 
+    // Initialize Web Worker for background preloading
+    initPreloadWorker();
+
+    // Initialize WebSocket connection for real-time price updates
+    initWebSocket();
+
+    // Preload watchlist data in background after initial load
+    setTimeout(() => {
+        preloadWatchlistData();
+    }, 2000);
+
     // Auto-refresh every 60 seconds
     setInterval(refreshData, 60000);
-    
+
     // Refresh prices every 60 seconds
     setInterval(() => {
         const tickers = Array.from(document.querySelectorAll('.company-item'))
             .map(el => el.dataset.ticker)
             .filter(Boolean);
-        
+
         if (tickers.length > 0) {
             loadPrices(tickers);
         }
     }, 60000);
+
+    // Refresh preloaded data every 5 minutes
+    setInterval(() => {
+        preloadWatchlistData();
+    }, 300000);
 });
 
 // Mobile-specific features
@@ -143,7 +271,7 @@ const BLUESKY_FINANCIAL_ACCOUNTS = [
     // Options & Flow
     { handle: 'unusualwhales.bsky.social', name: 'Unusual Whales', display: 'Unusual Whales' },
     { handle: 'spotgamma.bsky.social', name: 'SpotGamma', display: 'SpotGamma' },
-    { handle: 'carterbraxton.bsky.social', name: 'Carter Braxton', display: 'Carter Braxton' },
+    { handle: 'ladebackk.bsky.social', name: 'Assad Tannous', display: 'Assad Tannous' },
     { handle: 'jarvisflow.bsky.social', name: 'JarvisFlow', display: 'JarvisFlow' },
     { handle: 'darkpoolmarkets.bsky.social', name: 'Dark Pool', display: 'Dark Pool' },
     { handle: 'chriswhittall.bsky.social', name: 'Chris Whittall', display: 'Chris Whittall' },
@@ -153,7 +281,7 @@ const BLUESKY_FINANCIAL_ACCOUNTS = [
     { handle: 'carnage4life.bsky.social', name: 'Carnage4Life', display: 'Carnage4Life' },
     { handle: 'truflation.bsky.social', name: 'Truflation', display: 'Truflation' },
     { handle: 'kobeissiletter.bsky.social', name: 'Kobeissi Letter', display: 'Kobeissi Letter' },
-    { handle: 'dailyreckoning.bsky.social', name: 'Daily Reckoning', display: 'Daily Reckoning' },
+    { handle: 'federalreserve.gov', name: 'Federal Reserve', display: 'Fed Reserve' },
     { handle: 'elerianm.bsky.social', name: 'Mohamed El-Erian', display: 'El-Erian' },
     { handle: 'claudia-sahm.bsky.social', name: 'Claudia Sahm', display: 'Claudia Sahm' },
     { handle: 'josephpolitano.bsky.social', name: 'Joey Politano', display: 'Joey Politano' },
@@ -515,7 +643,7 @@ async function lookupStock(symbol) {
         showToast(`${symbol} loaded successfully`, 'success');
     } catch (error) {
         console.error('Error looking up stock:', error);
-        showToast(`Error looking up ${symbol}`, 'error`);
+        showToast(`Error looking up ${symbol}`, 'error');
     }
 }
 
@@ -1003,6 +1131,280 @@ function updatePriceDisplay(prices) {
     });
 }
 
+// =============================================================================
+// WebSocket Real-Time Price Updates
+// =============================================================================
+
+/**
+ * Initialize WebSocket connection for real-time price updates
+ */
+function initWebSocket() {
+    // Check if Socket.IO is available
+    if (typeof io === 'undefined') {
+        console.warn('[WebSocket] Socket.IO not available, falling back to polling');
+        updateConnectionStatus('polling');
+        return;
+    }
+
+    try {
+        // Connect to Socket.IO server
+        socket = io({
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+            reconnectionAttempts: WS_MAX_RECONNECT_ATTEMPTS,
+            reconnectionDelay: WS_RECONNECT_DELAY
+        });
+
+        // Connection established
+        socket.on('connect', () => {
+            console.log('[WebSocket] Connected to server');
+            wsConnected = true;
+            wsReconnectAttempts = 0;
+            updateConnectionStatus('connected');
+
+            // Subscribe to prices for current watchlist
+            subscribeToWatchlistPrices();
+        });
+
+        // Connection status from server
+        socket.on('connection_status', (data) => {
+            console.log('[WebSocket] Connection status:', data);
+        });
+
+        // Subscription confirmed
+        socket.on('subscription_confirmed', (data) => {
+            console.log('[WebSocket] Subscribed to tickers:', data.tickers);
+            subscribedTickers = data.tickers;
+        });
+
+        // Real-time price updates
+        socket.on('price_update', (data) => {
+            console.log('[WebSocket] Price update received for', Object.keys(data.prices).length, 'tickers');
+            handleRealtimePriceUpdate(data.prices);
+        });
+
+        // Disconnection
+        socket.on('disconnect', (reason) => {
+            console.warn('[WebSocket] Disconnected:', reason);
+            wsConnected = false;
+            updateConnectionStatus('disconnected');
+        });
+
+        // Connection error
+        socket.on('connect_error', (error) => {
+            console.error('[WebSocket] Connection error:', error.message);
+            wsReconnectAttempts++;
+            updateConnectionStatus('error');
+
+            // Fall back to polling if max reconnect attempts reached
+            if (wsReconnectAttempts >= WS_MAX_RECONNECT_ATTEMPTS) {
+                console.warn('[WebSocket] Max reconnect attempts reached, falling back to polling');
+                updateConnectionStatus('polling');
+            }
+        });
+
+        // Reconnection attempt
+        socket.on('reconnect_attempt', (attempt) => {
+            console.log('[WebSocket] Reconnection attempt:', attempt);
+            updateConnectionStatus('reconnecting');
+        });
+
+        // Successful reconnection
+        socket.on('reconnect', () => {
+            console.log('[WebSocket] Reconnected successfully');
+            wsConnected = true;
+            wsReconnectAttempts = 0;
+            updateConnectionStatus('connected');
+            subscribeToWatchlistPrices();
+        });
+
+    } catch (error) {
+        console.error('[WebSocket] Initialization error:', error);
+        updateConnectionStatus('error');
+    }
+}
+
+/**
+ * Subscribe to price updates for the current watchlist
+ */
+function subscribeToWatchlistPrices() {
+    if (!socket || !wsConnected) return;
+
+    // Collect all tickers from the page
+    const tickers = new Set();
+
+    // From top companies
+    document.querySelectorAll('.company-item[data-ticker]').forEach(el => {
+        tickers.add(el.dataset.ticker);
+    });
+
+    // From market indices
+    ['SPY', 'QQQ', 'DIA', 'IWM'].forEach(t => tickers.add(t));
+
+    // From stock ticker
+    document.querySelectorAll('.stock-ticker-item[data-ticker]').forEach(el => {
+        if (el.dataset.ticker) tickers.add(el.dataset.ticker);
+    });
+
+    const tickerList = Array.from(tickers);
+    if (tickerList.length > 0) {
+        console.log('[WebSocket] Subscribing to prices:', tickerList);
+        socket.emit('subscribe_prices', { tickers: tickerList });
+    }
+}
+
+/**
+ * Handle real-time price updates from WebSocket
+ */
+function handleRealtimePriceUpdate(prices) {
+    if (!prices) return;
+
+    Object.entries(prices).forEach(([ticker, data]) => {
+        const prevPrice = previousPrices[ticker]?.price;
+        const newPrice = data.price;
+        const direction = prevPrice ? (newPrice > prevPrice ? 'up' : newPrice < prevPrice ? 'down' : null) : null;
+
+        // Update all price displays for this ticker
+        updateTickerPriceElements(ticker, data, direction);
+
+        // Store for next comparison
+        previousPrices[ticker] = data;
+    });
+
+    // Also update the price cache for other functions
+    priceCache = { ...priceCache, ...prices };
+}
+
+/**
+ * Update all price display elements for a specific ticker
+ */
+function updateTickerPriceElements(ticker, data, direction) {
+    // Update company items in top companies panel
+    document.querySelectorAll(`.company-item[data-ticker="${ticker}"]`).forEach(item => {
+        const priceEl = item.querySelector('.company-price');
+        if (priceEl) {
+            const changeClass = data.change_pct > 0 ? 'up' : data.change_pct < 0 ? 'down' : 'neutral';
+            const changeIcon = data.change_pct > 0 ? '▲' : data.change_pct < 0 ? '▼' : '−';
+
+            priceEl.innerHTML = `
+                <span class="price">$${data.price.toFixed(2)}</span>
+                <span class="change ${changeClass}">
+                    ${changeIcon} ${Math.abs(data.change_pct || 0).toFixed(2)}%
+                </span>
+            `;
+
+            // Add flash animation
+            if (direction) {
+                priceEl.classList.remove('price-flash-up', 'price-flash-down');
+                void priceEl.offsetWidth; // Force reflow
+                priceEl.classList.add(direction === 'up' ? 'price-flash-up' : 'price-flash-down');
+            }
+        }
+    });
+
+    // Update market indices
+    document.querySelectorAll(`.market-item`).forEach(item => {
+        const symbolEl = item.querySelector('.market-symbol');
+        if (!symbolEl) return;
+
+        // Map ETFs to index symbols
+        const etfToIndex = { 'SPY': 'SPX', 'QQQ': 'IXIC', 'DIA': 'DJI', 'IWM': 'RUT' };
+        const indexSymbol = etfToIndex[ticker];
+        if (indexSymbol && symbolEl.textContent === indexSymbol) {
+            const priceEl = item.querySelector('.market-price');
+            const changeEl = item.querySelector('.market-change');
+
+            if (priceEl) {
+                priceEl.textContent = data.price.toFixed(2);
+                if (direction) {
+                    priceEl.classList.remove('price-flash-up', 'price-flash-down');
+                    void priceEl.offsetWidth;
+                    priceEl.classList.add(direction === 'up' ? 'price-flash-up' : 'price-flash-down');
+                }
+            }
+
+            if (changeEl) {
+                const isUp = data.change_pct > 0;
+                const isDown = data.change_pct < 0;
+                const arrow = isUp ? '▲' : isDown ? '▼' : '—';
+                changeEl.textContent = `${arrow}${Math.abs(data.change_pct).toFixed(2)}%`;
+                changeEl.className = `market-change ${isUp ? 'up' : isDown ? 'down' : 'flat'}`;
+            }
+        }
+    });
+
+    // Update stock ticker tape
+    document.querySelectorAll(`.stock-ticker-item`).forEach(item => {
+        const symbolEl = item.querySelector('.stock-symbol');
+        if (symbolEl && symbolEl.textContent === ticker) {
+            const priceEl = item.querySelector('.stock-price');
+            const changeEl = item.querySelector('.stock-change');
+
+            if (priceEl) {
+                priceEl.textContent = data.price.toFixed(2);
+                if (direction) {
+                    priceEl.classList.remove('price-flash-up', 'price-flash-down');
+                    void priceEl.offsetWidth;
+                    priceEl.classList.add(direction === 'up' ? 'price-flash-up' : 'price-flash-down');
+                }
+            }
+
+            if (changeEl) {
+                const isUp = data.change_pct > 0;
+                const isDown = data.change_pct < 0;
+                const arrow = isUp ? '▲' : isDown ? '▼' : '—';
+                const changeVal = Math.abs(data.change_pct).toFixed(2);
+                changeEl.innerHTML = `${arrow}${changeVal}%`;
+                changeEl.className = `stock-change ${isUp ? 'up' : isDown ? 'down' : 'flat'}`;
+            }
+        }
+    });
+}
+
+/**
+ * Update connection status indicator in the UI
+ */
+function updateConnectionStatus(status) {
+    // Create or update status indicator
+    let indicator = document.getElementById('wsConnectionStatus');
+    if (!indicator) {
+        indicator = document.createElement('div');
+        indicator.id = 'wsConnectionStatus';
+        indicator.className = 'ws-connection-status';
+        document.body.appendChild(indicator);
+    }
+
+    const statusConfig = {
+        connected: { icon: 'fas fa-plug', text: 'Live', class: 'connected' },
+        disconnected: { icon: 'fas fa-plug', text: 'Disconnected', class: 'disconnected' },
+        reconnecting: { icon: 'fas fa-sync-alt fa-spin', text: 'Reconnecting...', class: 'reconnecting' },
+        error: { icon: 'fas fa-exclamation-triangle', text: 'Connection Error', class: 'error' },
+        polling: { icon: 'fas fa-clock', text: 'Polling', class: 'polling' }
+    };
+
+    const config = statusConfig[status] || statusConfig.disconnected;
+    indicator.innerHTML = `<i class="${config.icon}"></i> <span>${config.text}</span>`;
+    indicator.className = `ws-connection-status ${config.class}`;
+
+    // Auto-hide connected status after 3 seconds
+    if (status === 'connected') {
+        setTimeout(() => {
+            indicator.classList.add('minimized');
+        }, 3000);
+    } else {
+        indicator.classList.remove('minimized');
+    }
+}
+
+/**
+ * Manually refresh WebSocket subscription (call after watchlist changes)
+ */
+function refreshWebSocketSubscription() {
+    if (socket && wsConnected) {
+        subscribeToWatchlistPrices();
+    }
+}
+
 // Articles pagination state
 let articlesState = {
     articles: [],
@@ -1225,7 +1627,7 @@ function setupInfiniteScroll() {
     observer.observe(sentinel);
 }
 
-// Setup article filters
+// Setup article filters with debounced search
 function setupArticleFilters() {
     // Source filter
     const filterSelect = document.getElementById('articleFilter');
@@ -1244,17 +1646,44 @@ function setupArticleFilters() {
             loadMoreArticles();
         });
     }
-    
-    // Search input (if exists)
+
+    // Search input with debounce
     const searchInput = document.getElementById('articleSearch');
     if (searchInput) {
+        // Debounced search on input
+        searchInput.addEventListener('input', (e) => {
+            // Clear existing timer
+            if (searchDebounceTimer) {
+                clearTimeout(searchDebounceTimer);
+            }
+
+            // Set new debounced search
+            searchDebounceTimer = setTimeout(() => {
+                const searchValue = e.target.value.trim();
+                // Only search if at least 2 characters or empty (to clear)
+                if (searchValue.length >= 2 || searchValue.length === 0) {
+                    articlesState.filters.search = searchValue || null;
+                    articlesState.offset = 0;
+                    articlesState.articles = [];
+                    articlesState.hasMore = true;
+                    document.getElementById('articlesList').innerHTML = '<div class="loading-indicator"><i class="fas fa-spinner fa-spin"></i> Searching...</div>';
+                    loadMoreArticles();
+                }
+            }, SEARCH_DEBOUNCE_MS);
+        });
+
+        // Immediate search on Enter key
         searchInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
+                // Clear debounce timer
+                if (searchDebounceTimer) {
+                    clearTimeout(searchDebounceTimer);
+                }
                 articlesState.filters.search = e.target.value.trim() || null;
                 articlesState.offset = 0;
                 articlesState.articles = [];
                 articlesState.hasMore = true;
-                document.getElementById('articlesList').innerHTML = '';
+                document.getElementById('articlesList').innerHTML = '<div class="loading-indicator"><i class="fas fa-spinner fa-spin"></i> Searching...</div>';
                 loadMoreArticles();
             }
         });
@@ -2327,20 +2756,45 @@ function toggleTickerPause() {
 // ============================================================================
 
 const KEYBOARD_SHORTCUTS = {
-    'r': { action: 'refresh', description: 'Refresh data' },
-    'a': { action: 'alerts', description: 'Jump to Alerts' },
-    'e': { action: 'economic', description: 'Economic Calendar' },
-    'n': { action: 'news', description: 'Jump to News feed' },
-    't': { action: 'ticker', description: 'Jump to Ticker' },
-    's': { action: 'settings', description: 'Open Settings' },
-    '/': { action: 'search', description: 'Search articles/companies' },
-    'k': { action: 'search', description: 'Search (with Ctrl)' },
-    '?': { action: 'help', description: 'Show help' },
-    'h': { action: 'help', description: 'Show help' },
+    // Navigation
+    'r': { action: 'refresh', description: 'Refresh data', category: 'navigation' },
+    'a': { action: 'alerts', description: 'Jump to Alerts', category: 'navigation' },
+    'e': { action: 'economic', description: 'Economic Calendar', category: 'navigation' },
+    'n': { action: 'news', description: 'Jump to News feed', category: 'navigation' },
+    't': { action: 'ticker', description: 'Jump to Ticker', category: 'navigation' },
+    's': { action: 'settings', description: 'Open Settings', category: 'navigation' },
+    'w': { action: 'watchlist', description: 'Focus Watchlist', category: 'navigation' },
+    'm': { action: 'market', description: 'Market Overview', category: 'navigation' },
+
+    // Search
+    '/': { action: 'search', description: 'Open Search', category: 'search' },
+    'k': { action: 'search', description: 'Open Search (Ctrl+K)', category: 'search' },
+
+    // Help
+    '?': { action: 'help', description: 'Show shortcuts help', category: 'help' },
+    'h': { action: 'help', description: 'Show shortcuts help', category: 'help' },
+
+    // Quick actions (number keys)
+    '1': { action: 'quick1', description: 'Refresh data', category: 'quick' },
+    '2': { action: 'quick2', description: 'Toggle Watchlist', category: 'quick' },
+    '3': { action: 'quick3', description: 'View Top Gainers', category: 'quick' },
+    '4': { action: 'quick4', description: 'View Top Losers', category: 'quick' },
+    '5': { action: 'quick5', description: 'View Most Active', category: 'quick' },
+    '6': { action: 'quick6', description: 'Open Bluesky Feed', category: 'quick' },
+    '7': { action: 'quick7', description: 'Open Dashboard', category: 'quick' },
+    '8': { action: 'quick8', description: 'Open Settings', category: 'quick' },
+    '9': { action: 'quick9', description: 'Run Bot', category: 'quick' },
 };
 
 let searchMode = false;
 let helpVisible = false;
+
+// Navigation state for arrow key navigation
+let navigationState = {
+    activePanel: null,
+    selectedIndex: -1,
+    items: []
+};
 
 function initKeyboardShortcuts() {
     document.addEventListener('keydown', handleKeydown);
@@ -2356,72 +2810,288 @@ function handleKeydown(e) {
         }
         return;
     }
-    
-    // Handle Escape key to close overlays
-    if (e.key === 'Escape') {
-        if (helpVisible) {
-            hideHelpOverlay();
-        }
+
+    // Handle Ctrl+K for search
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        openSearch();
         return;
     }
-    
+
+    // Handle Escape key to close overlays/modals
+    if (e.key === 'Escape') {
+        e.preventDefault();
+        closeAllOverlays();
+        return;
+    }
+
+    // Handle arrow key navigation
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        if (navigationState.activePanel && navigationState.items.length > 0) {
+            e.preventDefault();
+            navigateList(e.key === 'ArrowDown' ? 1 : -1);
+            return;
+        }
+    }
+
+    // Handle Enter key to select highlighted item
+    if (e.key === 'Enter') {
+        if (navigationState.activePanel && navigationState.selectedIndex >= 0) {
+            e.preventDefault();
+            selectNavigatedItem();
+            return;
+        }
+    }
+
     const key = e.key.toLowerCase();
     const shortcut = KEYBOARD_SHORTCUTS[key];
-    
+
     if (!shortcut) return;
-    
+
     // Handle help first
     if (shortcut.action === 'help') {
+        e.preventDefault();
         toggleHelpOverlay();
         return;
     }
-    
+
     // Close help if open
     if (helpVisible && shortcut.action !== 'help') {
         hideHelpOverlay();
     }
-    
+
     // Execute shortcut
     switch (shortcut.action) {
         case 'refresh':
+        case 'quick1':
             e.preventDefault();
             refreshData();
             showToast('Refreshing...', 'info');
             break;
-            
+
         case 'alerts':
             e.preventDefault();
             focusPanel('alertsList');
             highlightPanel('.alerts-panel, .panel:has(#alertsList)');
+            showToast('Alerts focused', 'info');
             break;
-            
+
+        case 'economic':
+            e.preventDefault();
+            handleEconomicCalendarShortcut();
+            break;
+
         case 'news':
             e.preventDefault();
-            focusPanel('articlesList');
+            focusPanelWithNavigation('articlesList', '.article-item');
             highlightPanel('.articles-panel');
+            showToast('News feed focused - use arrows to navigate', 'info');
             break;
-            
+
         case 'ticker':
             e.preventDefault();
             focusPanel('newsTicker');
             highlightPanel('.news-ticker-container');
             break;
-            
+
         case 'settings':
+        case 'quick8':
             e.preventDefault();
             switchTab('settings');
             showToast('Settings opened', 'info');
             break;
-            
+
         case 'search':
             e.preventDefault();
             openSearch();
             break;
-            
+
+        case 'watchlist':
+        case 'quick2':
+            e.preventDefault();
+            focusPanelWithNavigation('topCompaniesCompact', '.company-item, .mover-item');
+            highlightPanel('.panel:has(#topCompaniesCompact), .panel:has(#marketMovers)');
+            showToast('Watchlist focused - use arrows to navigate', 'info');
+            break;
+
+        case 'market':
+            e.preventDefault();
+            focusPanelWithNavigation('marketMovers', '.mover-item');
+            highlightPanel('.panel:has(#marketMovers)');
+            showToast('Market overview focused', 'info');
+            break;
+
+        case 'quick3':
+            e.preventDefault();
+            switchMarketTab('gainers');
+            break;
+
+        case 'quick4':
+            e.preventDefault();
+            switchMarketTab('losers');
+            break;
+
+        case 'quick5':
+            e.preventDefault();
+            switchMarketTab('active');
+            break;
+
+        case 'quick6':
+            e.preventDefault();
+            focusPanel('blueskyFeedFull');
+            highlightPanel('.bluesky-panel-full');
+            showToast('Bluesky feed focused', 'info');
+            break;
+
+        case 'quick7':
+            e.preventDefault();
+            switchTab('dashboard');
+            showToast('Dashboard opened', 'info');
+            break;
+
+        case 'quick9':
+            e.preventDefault();
+            runBot();
+            break;
+
         case 'timeframe':
             e.preventDefault();
             setChartTimeframe(shortcut.value);
             break;
+    }
+}
+
+// Close all open overlays and modals
+function closeAllOverlays() {
+    let closed = false;
+
+    // Close help overlay
+    if (helpVisible) {
+        hideHelpOverlay();
+        closed = true;
+    }
+
+    // Close search overlay
+    const searchOverlay = document.getElementById('searchOverlay');
+    if (searchOverlay && searchOverlay.classList.contains('active')) {
+        closeSearchOverlay();
+        closed = true;
+    }
+
+    // Close stock modal
+    const stockModal = document.getElementById('stockDetailModal');
+    if (stockModal && stockModal.style.display !== 'none') {
+        closeStockModal();
+        closed = true;
+    }
+
+    // Close stock details panel
+    const stockDetails = document.getElementById('stockDetailsPanel');
+    if (stockDetails && stockDetails.style.display !== 'none') {
+        closeStockDetails();
+        closed = true;
+    }
+
+    // Reset navigation state
+    clearNavigationState();
+
+    if (!closed) {
+        // Focus command input as fallback
+        const commandInput = document.getElementById('commandInput');
+        if (commandInput) {
+            commandInput.focus();
+        }
+    }
+}
+
+// Focus panel with navigation enabled
+function focusPanelWithNavigation(panelId, itemSelector) {
+    const panel = document.getElementById(panelId);
+    if (!panel) return;
+
+    // Scroll panel into view
+    panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    // Set up navigation state
+    navigationState.activePanel = panelId;
+    navigationState.items = Array.from(panel.querySelectorAll(itemSelector));
+    navigationState.selectedIndex = -1;
+
+    // Highlight first item
+    if (navigationState.items.length > 0) {
+        navigationState.selectedIndex = 0;
+        updateNavigationHighlight();
+    }
+}
+
+// Navigate through list items
+function navigateList(direction) {
+    if (!navigationState.items || navigationState.items.length === 0) return;
+
+    // Remove previous highlight
+    clearNavigationHighlight();
+
+    // Update index
+    navigationState.selectedIndex += direction;
+
+    // Wrap around
+    if (navigationState.selectedIndex < 0) {
+        navigationState.selectedIndex = navigationState.items.length - 1;
+    } else if (navigationState.selectedIndex >= navigationState.items.length) {
+        navigationState.selectedIndex = 0;
+    }
+
+    // Apply new highlight
+    updateNavigationHighlight();
+}
+
+// Update navigation highlight
+function updateNavigationHighlight() {
+    const item = navigationState.items[navigationState.selectedIndex];
+    if (item) {
+        item.classList.add('keyboard-nav-selected');
+        item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+}
+
+// Clear navigation highlight
+function clearNavigationHighlight() {
+    navigationState.items.forEach(item => {
+        item.classList.remove('keyboard-nav-selected');
+    });
+}
+
+// Clear navigation state
+function clearNavigationState() {
+    clearNavigationHighlight();
+    navigationState.activePanel = null;
+    navigationState.selectedIndex = -1;
+    navigationState.items = [];
+}
+
+// Select the currently navigated item
+function selectNavigatedItem() {
+    const item = navigationState.items[navigationState.selectedIndex];
+    if (!item) return;
+
+    // Try to find ticker or trigger click
+    const ticker = item.dataset.ticker ||
+                   item.querySelector('.company-ticker, .mover-symbol')?.textContent?.trim();
+
+    if (ticker) {
+        openStockModal(ticker);
+    } else {
+        // Fallback: click the item
+        item.click();
+    }
+}
+
+// Switch market movers tab
+function switchMarketTab(tab) {
+    const tabBtn = document.querySelector(`.market-tab[data-tab="${tab}"]`);
+    if (tabBtn) {
+        tabBtn.click();
+        showToast(`Showing ${tab}`, 'info');
     }
 }
 
@@ -2526,50 +3196,76 @@ function createHelpOverlay() {
     const overlay = document.createElement('div');
     overlay.id = 'keyboardHelpOverlay';
     overlay.className = 'help-overlay';
-    
-    const shortcuts = Object.entries(KEYBOARD_SHORTCUTS)
-        .filter(([key, val]) => !['1', '2', '3', '4'].includes(key)) // Exclude number keys from main list
+
+    // Group shortcuts by category
+    const navigationShortcuts = Object.entries(KEYBOARD_SHORTCUTS)
+        .filter(([key, val]) => val.category === 'navigation')
         .map(([key, val]) => `
             <div class="help-row">
                 <span class="help-key">${key.toUpperCase()}</span>
                 <span class="help-desc">${val.description}</span>
             </div>
         `).join('');
-    
+
+    const quickActions = Object.entries(KEYBOARD_SHORTCUTS)
+        .filter(([key, val]) => val.category === 'quick')
+        .map(([key, val]) => `
+            <div class="help-row">
+                <span class="help-key">${key}</span>
+                <span class="help-desc">${val.description}</span>
+            </div>
+        `).join('');
+
     overlay.innerHTML = `
         <div class="help-content">
             <div class="help-header">
-                <h2>⌨️  KEYBOARD SHORTCUTS</h2>
-                <button class="help-close" onclick="hideHelpOverlay()">✕</button>
+                <h2><i class="fas fa-keyboard"></i> KEYBOARD SHORTCUTS</h2>
+                <button class="help-close" onclick="hideHelpOverlay()"><i class="fas fa-times"></i></button>
             </div>
-            <div class="help-section">
-                <h3>NAVIGATION</h3>
-                ${shortcuts}
-            </div>
-            <div class="help-section">
-                <h3>SEARCH</h3>
-                <div class="help-row"><span class="help-key">/</span><span class="help-desc">Open Search</span></div>
-                <div class="help-row"><span class="help-key">^K</span><span class="help-desc">Open Search (Ctrl+K)</span></div>
-                <div class="help-row"><span class="help-key">ESC</span><span class="help-desc">Close Search</span></div>
-            </div>
-            <div class="help-section">
-                <h3>CHART TIMEFRAMES</h3>
-                <div class="help-row"><span class="help-key">1</span><span class="help-desc">1 Hour</span></div>
-                <div class="help-row"><span class="help-key">2</span><span class="help-desc">6 Hours</span></div>
-                <div class="help-row"><span class="help-key">3</span><span class="help-desc">24 Hours</span></div>
-                <div class="help-row"><span class="help-key">4</span><span class="help-desc">7 Days</span></div>
+            <div class="help-columns">
+                <div class="help-column">
+                    <div class="help-section">
+                        <h3>NAVIGATION</h3>
+                        ${navigationShortcuts}
+                    </div>
+                    <div class="help-section">
+                        <h3>SEARCH</h3>
+                        <div class="help-row"><span class="help-key">/</span><span class="help-desc">Open Search Overlay</span></div>
+                        <div class="help-row"><span class="help-key">Ctrl+K</span><span class="help-desc">Open Search Overlay</span></div>
+                        <div class="help-row"><span class="help-key">ESC</span><span class="help-desc">Close Any Modal/Overlay</span></div>
+                    </div>
+                </div>
+                <div class="help-column">
+                    <div class="help-section">
+                        <h3>QUICK ACTIONS (1-9)</h3>
+                        ${quickActions}
+                    </div>
+                    <div class="help-section">
+                        <h3>LIST NAVIGATION</h3>
+                        <div class="help-row"><span class="help-key"><i class="fas fa-arrow-up"></i></span><span class="help-desc">Navigate Up</span></div>
+                        <div class="help-row"><span class="help-key"><i class="fas fa-arrow-down"></i></span><span class="help-desc">Navigate Down</span></div>
+                        <div class="help-row"><span class="help-key">Enter</span><span class="help-desc">Select/Open Item</span></div>
+                    </div>
+                    <div class="help-section">
+                        <h3>HELP</h3>
+                        <div class="help-row"><span class="help-key">?</span><span class="help-desc">Show This Help</span></div>
+                        <div class="help-row"><span class="help-key">H</span><span class="help-desc">Show This Help</span></div>
+                    </div>
+                </div>
             </div>
             <div class="help-footer">
-                Press ? or H to toggle this help • ESC to close
+                <span>Press <kbd>?</kbd> or <kbd>H</kbd> to toggle help</span>
+                <span class="help-separator">|</span>
+                <span>Press <kbd>ESC</kbd> to close</span>
             </div>
         </div>
     `;
-    
-    // Close on escape
+
+    // Close on escape or clicking outside
     overlay.addEventListener('click', (e) => {
         if (e.target === overlay) hideHelpOverlay();
     });
-    
+
     document.body.appendChild(overlay);
     return overlay;
 }
@@ -2617,13 +3313,9 @@ window.executeCommand = executeCommand;
 window.lookupStock = lookupStock;
 window.closeStockDetails = closeStockDetails;
 window.showEventDetails = showEventDetails;
-
-// Add ESC key to close stock details
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-        closeStockDetails();
-    }
-});
+window.closeAllOverlays = closeAllOverlays;
+window.switchMarketTab = switchMarketTab;
+window.handleEconomicCalendarShortcut = handleEconomicCalendarShortcut;
 
 
 // ============================================================================
@@ -3041,105 +3733,15 @@ function formatTime12h(time24h) {
     return `${hour12}:${minutes} ${ampm}`;
 }
 
-// Add economic calendar to keyboard shortcuts
-
-
-// Handle economic calendar shortcut
+// Handle economic calendar shortcut (used by 'e' key)
 function handleEconomicCalendarShortcut() {
     const container = document.getElementById('economicCalendar');
     if (container) {
         container.scrollIntoView({ behavior: 'smooth', block: 'center' });
         highlightPanel('.economic-calendar-section');
+        showToast('Economic calendar focused', 'info');
     }
 }
-
-// Update handleKeydown to include economic calendar
-const originalHandleKeydown = handleKeydown;
-handleKeydown = function(e) {
-    // Don't trigger shortcuts when typing in inputs
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
-        if (e.key === 'Escape') {
-            e.target.blur();
-            searchMode = false;
-        }
-        return;
-    }
-    
-    // Handle Escape key to close overlays
-    if (e.key === 'Escape') {
-        if (helpVisible) {
-            hideHelpOverlay();
-        }
-        return;
-    }
-    
-    const key = e.key.toLowerCase();
-    
-    // Handle 'e' key for economic calendar
-    if (key === 'e') {
-        e.preventDefault();
-        handleEconomicCalendarShortcut();
-        return;
-    }
-    
-    // Call original handler for other keys
-    const shortcut = KEYBOARD_SHORTCUTS[key];
-    if (!shortcut) return;
-    
-    // Handle help first
-    if (shortcut.action === 'help') {
-        toggleHelpOverlay();
-        return;
-    }
-    
-    // Close help if open
-    if (helpVisible && shortcut.action !== 'help') {
-        hideHelpOverlay();
-    }
-    
-    // Execute shortcut
-    switch (shortcut.action) {
-        case 'refresh':
-            e.preventDefault();
-            refreshData();
-            showToast('Refreshing...', 'info');
-            break;
-            
-        case 'alerts':
-            e.preventDefault();
-            focusPanel('alertsList');
-            highlightPanel('.alerts-panel, .panel:has(#alertsList)');
-            break;
-            
-        case 'news':
-            e.preventDefault();
-            focusPanel('articlesList');
-            highlightPanel('.articles-panel');
-            break;
-            
-        case 'ticker':
-            e.preventDefault();
-            focusPanel('newsTicker');
-            highlightPanel('.news-ticker-container');
-            break;
-            
-        case 'settings':
-            e.preventDefault();
-            switchTab('settings');
-            showToast('Settings opened', 'info');
-            break;
-            
-        case 'search':
-            e.preventDefault();
-            openSearch();
-            break;
-            
-        case 'timeframe':
-            e.preventDefault();
-            setChartTimeframe(shortcut.value);
-            break;
-    }
-};
 
 
 
@@ -3150,52 +3752,173 @@ handleKeydown = function(e) {
 
 let currentModalTicker = null;
 let stockChartInstance = null;
+let rsiChartInstance = null;
+let macdChartInstance = null;
 let currentChartPeriod = '1mo';
+// Note: currentChartType already declared at top of file
+let currentChartData = null;
+let activeIndicators = {
+    bollinger: false,
+    rsi: false,
+    macd: false
+};
+
+// Store original modal content for restoration
+let originalModalContent = null;
+
+// =============================================================================
+// Preload Watchlist Data Functions
+// =============================================================================
+
+/**
+ * Preload detailed stock data for watchlist stocks in background.
+ * This allows instant modal opening for frequently viewed stocks.
+ */
+async function preloadWatchlistData() {
+    if (preloadInProgress) {
+        console.log('[Preload] Already in progress, skipping');
+        return;
+    }
+
+    preloadInProgress = true;
+    console.log('[Preload] Starting background preload of watchlist data...');
+
+    try {
+        const response = await fetchWithTimeout('/api/preload/watchlist', {}, 15000);
+        const data = await response.json();
+
+        if (data.stocks) {
+            preloadedStockData = { ...preloadedStockData, ...data.stocks };
+            console.log(`[Preload] Preloaded ${data.preloaded} stocks successfully`);
+        }
+    } catch (error) {
+        console.warn('[Preload] Background preload failed:', error.message);
+    } finally {
+        preloadInProgress = false;
+    }
+}
+
+/**
+ * Check if we have preloaded data for a ticker
+ */
+function hasPreloadedData(ticker) {
+    return ticker in preloadedStockData;
+}
+
+/**
+ * Get preloaded data for a ticker
+ */
+function getPreloadedData(ticker) {
+    return preloadedStockData[ticker] || null;
+}
 
 /**
  * Open the stock detail modal for a given ticker
+ * Uses preloaded data if available for instant display
  * @param {string} ticker - The stock ticker symbol
  */
 async function openStockModal(ticker) {
     if (!ticker) return;
-    
+
     ticker = ticker.toUpperCase().trim();
     currentModalTicker = ticker;
     currentChartPeriod = '1mo';
-    
+
+    // Reset lazy load state for tabs
+    Object.keys(tabLoadState).forEach(key => tabLoadState[key] = false);
+
     const modal = document.getElementById('stockDetailModal');
     if (!modal) {
         console.error('[StockModal] Modal element not found');
         return;
     }
-    
-    // Show modal with loading state
+
+    // Save original content if not already saved
+    const content = modal.querySelector('.stock-modal-content');
+    if (content && !originalModalContent) {
+        originalModalContent = content.innerHTML;
+    }
+
+    // Show modal immediately
     modal.style.display = 'flex';
-    showModalLoading();
-    
+
+    // Check for preloaded data first for instant display
+    const preloaded = getPreloadedData(ticker);
+    if (preloaded) {
+        console.log(`[StockModal] Using preloaded data for ${ticker}`);
+        // Show preloaded data immediately while fetching full details
+        showPartialData(preloaded);
+    } else {
+        showModalLoading();
+    }
+
     try {
-        // Fetch stock details
+        // Fetch full stock details
         const response = await fetchWithTimeout(`/api/stock/${ticker}`);
         const data = await response.json();
-        
+
         if (data.error) {
             showModalError(data.error);
             return;
         }
-        
-        // Populate modal with data
+
+        // Store for lazy tab loading
+        currentStockData = data;
+
+        // Populate modal with full data (only Overview tab initially)
         populateModalData(data);
-        
-        // Fetch and render chart
+        tabLoadState.overview = true;
+
+        // Only load chart for overview tab (lazy load others on tab click)
         await loadAndRenderChart(ticker, currentChartPeriod);
-        
-        // Fetch related news
-        await loadRelatedNews(ticker);
-        
+        tabLoadState.chart = true;
+
+        // News will be loaded lazily when News tab is clicked
+
     } catch (error) {
         console.error('[StockModal] Error loading stock data:', error);
-        showModalError('Failed to load stock data');
+        if (!preloaded) {
+            showModalError('Failed to load stock data');
+        }
     }
+}
+
+/**
+ * Show partial data from preload while full data loads
+ */
+function showPartialData(data) {
+    const modal = document.getElementById('stockDetailModal');
+    if (!modal) return;
+
+    // Restore full modal structure if needed
+    const content = modal.querySelector('.stock-modal-content');
+    if (content && originalModalContent) {
+        content.innerHTML = originalModalContent;
+    }
+
+    // Update header info from preloaded data
+    const symbolEl = document.getElementById('modalSymbol');
+    const nameEl = document.getElementById('modalName');
+    const priceEl = document.getElementById('modalPrice');
+    const changeEl = document.getElementById('modalChange');
+
+    if (symbolEl) symbolEl.textContent = data.ticker;
+    if (nameEl) nameEl.textContent = data.name || data.ticker;
+    if (priceEl) priceEl.textContent = `$${data.price}`;
+
+    if (changeEl) {
+        const isUp = data.change >= 0;
+        const arrow = isUp ? '▲' : '▼';
+        changeEl.textContent = `${arrow} ${data.change >= 0 ? '+' : ''}${data.change} (${data.change_percent >= 0 ? '+' : ''}${data.change_percent}%)`;
+        changeEl.className = `stock-modal-change ${isUp ? 'up' : 'down'}`;
+    }
+
+    // Show loading indicators for other fields
+    const loadingFields = ['modalMarketCap', 'modalVolume', 'modalAvgVol', 'modalBeta'];
+    loadingFields.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = '<i class="fas fa-spinner fa-spin" style="opacity: 0.5;"></i>';
+    });
 }
 
 /**
@@ -3206,14 +3929,40 @@ function closeStockModal() {
     if (modal) {
         modal.style.display = 'none';
     }
-    
-    // Destroy chart instance
+
+    // Destroy chart instances
     if (stockChartInstance) {
         stockChartInstance.destroy();
         stockChartInstance = null;
     }
-    
+    if (rsiChartInstance) {
+        rsiChartInstance.destroy();
+        rsiChartInstance = null;
+    }
+    if (macdChartInstance) {
+        macdChartInstance.destroy();
+        macdChartInstance = null;
+    }
+
+    // Reset indicator states
+    activeIndicators = { bollinger: false, rsi: false, macd: false };
+    currentChartData = null;
+    currentChartType = 'line';
     currentModalTicker = null;
+
+    // Hide indicator panels
+    const rsiPanel = document.getElementById('rsiPanel');
+    if (rsiPanel) rsiPanel.style.display = 'none';
+    const macdPanel = document.getElementById('macdPanel');
+    if (macdPanel) macdPanel.style.display = 'none';
+
+    // Reset indicator buttons
+    document.querySelectorAll('.indicator-toggle-btn').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    document.querySelectorAll('.chart-type-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.type === 'line');
+    });
 }
 
 /**
@@ -3253,75 +4002,332 @@ function showModalError(message) {
  * Populate modal with stock data
  */
 function populateModalData(data) {
-    // Restore full modal structure if it was replaced
     const modal = document.getElementById('stockDetailModal');
     if (!modal) return;
-    
+
+    // Restore full modal structure if it was replaced by loading state
+    const content = modal.querySelector('.stock-modal-content');
+    if (content && originalModalContent) {
+        content.innerHTML = originalModalContent;
+    }
+
+    // Helper to safely set element text
+    const setText = (id, value, prefix = '', suffix = '') => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.textContent = (value && value !== 'N/A') ? `${prefix}${value}${suffix}` : 'N/A';
+        }
+    };
+
+    // Helper to format large numbers
+    const formatLargeNum = (num) => {
+        if (!num || num === 'N/A') return 'N/A';
+        if (typeof num === 'string') return num;
+        if (num >= 1e12) return `${(num / 1e12).toFixed(2)}T`;
+        if (num >= 1e9) return `${(num / 1e9).toFixed(2)}B`;
+        if (num >= 1e6) return `${(num / 1e6).toFixed(2)}M`;
+        return num.toLocaleString();
+    };
+
+    // Reset to first tab
+    switchStockTab('overview');
+
     // Update header info
     document.getElementById('modalSymbol').textContent = data.ticker;
     document.getElementById('modalName').textContent = data.name || data.ticker;
-    
+
     // Update price
     const priceEl = document.getElementById('modalPrice');
     priceEl.textContent = `$${data.price}`;
-    
+
     // Update change
     const changeEl = document.getElementById('modalChange');
     const isUp = data.change >= 0;
     const arrow = isUp ? '▲' : '▼';
     changeEl.textContent = `${arrow} ${data.change >= 0 ? '+' : ''}${data.change} (${data.change_percent >= 0 ? '+' : ''}${data.change_percent}%)`;
     changeEl.className = `stock-modal-change ${isUp ? 'up' : 'down'}`;
-    
-    // Update stats grid
-    document.getElementById('modalMarketCap').textContent = data.market_cap || 'N/A';
-    document.getElementById('modalPE').textContent = data.pe_ratio || 'N/A';
-    document.getElementById('modalVolume').textContent = formatVolume(data.volume);
-    document.getElementById('modalAvgVol').textContent = formatVolume(data.avg_volume);
-    document.getElementById('modal52High').textContent = data['52_week_high'] || 'N/A';
-    document.getElementById('modal52Low').textContent = data['52_week_low'] || 'N/A';
-    document.getElementById('modalOpen').textContent = data.open || 'N/A';
-    document.getElementById('modalPrevClose').textContent = data.previous_close || 'N/A';
-    
-    // Update company info
-    document.getElementById('modalSector').textContent = data.sector || 'N/A';
-    document.getElementById('modalIndustry').textContent = data.industry || 'N/A';
-    document.getElementById('modalEmployees').textContent = data.employees ? formatNumber(data.employees) : 'N/A';
-    
-    // EPS and Dividend Yield (may not be available for all stocks)
-    const epsRow = document.getElementById('modalEPSRow');
-    if (data.eps && data.eps !== 'N/A') {
-        epsRow.style.display = 'flex';
-        document.getElementById('modalEPS').textContent = `$${data.eps}`;
-    } else {
-        epsRow.style.display = 'none';
+
+    // ========== OVERVIEW TAB ==========
+    setText('modalMarketCap', data.market_cap);
+    setText('modalVolume', formatVolume(data.volume));
+    setText('modalAvgVol', formatVolume(data.avg_volume));
+    setText('modalBeta', data.beta);
+    setText('modal52High', data['52_week_high'], '$');
+    setText('modal52Low', data['52_week_low'], '$');
+    setText('modalOpen', data.open, '$');
+    setText('modalPrevClose', data.previous_close, '$');
+
+    setText('modal50DayAvg', data.fifty_day_avg, '$');
+    setText('modal200DayAvg', data.two_hundred_day_avg, '$');
+
+    // 52 week change with color
+    const change52El = document.getElementById('modal52WChange');
+    if (change52El && data.fifty_two_week_change && data.fifty_two_week_change !== 'N/A') {
+        change52El.textContent = `${data.fifty_two_week_change >= 0 ? '+' : ''}${data.fifty_two_week_change}%`;
+        change52El.style.color = data.fifty_two_week_change >= 0 ? '#00c853' : '#ff5252';
+    } else if (change52El) {
+        change52El.textContent = 'N/A';
+        change52El.style.color = '';
     }
-    
-    const divYieldRow = document.getElementById('modalDivYieldRow');
-    if (data.dividend_yield && data.dividend_yield !== 0) {
-        divYieldRow.style.display = 'flex';
-        document.getElementById('modalDivYield').textContent = `${data.dividend_yield}%`;
-    } else {
-        divYieldRow.style.display = 'none';
+
+    // Bid/Ask
+    const bidAskEl = document.getElementById('modalBidAsk');
+    if (bidAskEl) {
+        if (data.bid && data.ask && data.bid !== 'N/A' && data.ask !== 'N/A') {
+            bidAskEl.textContent = `${data.bid} / ${data.ask}`;
+        } else {
+            bidAskEl.textContent = 'N/A';
+        }
     }
-    
+
+    // Day Range
+    const dayRangeEl = document.getElementById('modalDayRange');
+    if (dayRangeEl) {
+        if (data.day_low && data.day_high && data.day_low !== 'N/A' && data.day_high !== 'N/A') {
+            dayRangeEl.textContent = `${data.day_low} - ${data.day_high}`;
+        } else {
+            dayRangeEl.textContent = 'N/A';
+        }
+    }
+
+    setText('modalEPS', data.eps, '$');
+    setText('modalDivYield', data.dividend_yield, '', '%');
+    setText('modalEarningsDate', data.earnings_date);
+
+    // ========== VALUATION TAB ==========
+    setText('modalPE', data.pe_ratio);
+    setText('modalForwardPE', data.forward_pe);
+    setText('modalPEG', data.peg_ratio);
+    setText('modalPB', data.price_to_book);
+    setText('modalPS', data.price_to_sales);
+    setText('modalEVRevenue', data.ev_to_revenue);
+    setText('modalEVEBITDA', data.ev_to_ebitda);
+    setText('modalEV', data.enterprise_value);
+
+    // Growth with colors
+    const setGrowth = (id, value) => {
+        const el = document.getElementById(id);
+        if (el && value && value !== 'N/A') {
+            el.textContent = `${value >= 0 ? '+' : ''}${value}%`;
+            el.style.color = value >= 0 ? '#00c853' : '#ff5252';
+        } else if (el) {
+            el.textContent = 'N/A';
+            el.style.color = '';
+        }
+    };
+    setGrowth('modalRevGrowth', data.revenue_growth);
+    setGrowth('modalEarningsGrowth', data.earnings_growth);
+    setGrowth('modalQtrGrowth', data.earnings_quarterly_growth);
+    setText('modalForwardEPS', data.forward_eps, '$');
+
+    // ========== FINANCIALS TAB ==========
+    setText('modalProfitMargin', data.profit_margin, '', '%');
+    setText('modalOpMargin', data.operating_margin, '', '%');
+    setText('modalGrossMargin', data.gross_margin, '', '%');
+    setText('modalEBITDAMargin', data.ebitda_margin, '', '%');
+    setText('modalROE', data.roe, '', '%');
+    setText('modalROA', data.roa, '', '%');
+    setText('modalRevenue', data.revenue);
+    setText('modalNetIncome', data.net_income);
+
+    setText('modalTotalCash', data.total_cash);
+    setText('modalTotalDebt', data.total_debt);
+    setText('modalDebtEquity', data.debt_to_equity, '', '%');
+    setText('modalCurrentRatio', data.current_ratio);
+    setText('modalQuickRatio', data.quick_ratio);
+    setText('modalBookValue', data.book_value, '$');
+    setText('modalFCF', data.free_cash_flow);
+    setText('modalOpCashFlow', data.operating_cash_flow);
+
+    setText('modalDivRate', data.dividend_rate, '$');
+    setText('modalDivYieldPct', data.dividend_yield, '', '%');
+    setText('modalPayoutRatio', data.payout_ratio, '', '%');
+    setText('modal5YAvgYield', data.five_year_avg_dividend_yield, '', '%');
+
+    // ========== OWNERSHIP TAB ==========
+    setText('modalInsiderOwn', data.insider_ownership, '', '%');
+    setText('modalInstOwn', data.institutional_ownership, '', '%');
+    setText('modalSharesOut', formatLargeNum(data.shares_outstanding));
+    setText('modalFloat', formatLargeNum(data.float_shares));
+
+    setText('modalShortPct', data.short_percent_of_float, '', '%');
+    setText('modalShortRatio', data.short_ratio);
+    setText('modalSharesShort', formatLargeNum(data.shares_short));
+    setText('modalSharesShortPrior', formatLargeNum(data.shares_short_prior));
+
+    // Top Holders
+    const holdersEl = document.getElementById('modalTopHolders');
+    if (holdersEl) {
+        if (data.top_holders && data.top_holders.length > 0) {
+            holdersEl.innerHTML = data.top_holders.map(h => `
+                <div class="holder-item">
+                    <span class="holder-name">${h.name}</span>
+                    <div class="holder-stats">
+                        <div class="holder-stat">
+                            <span class="holder-stat-label">Shares</span>
+                            <span class="holder-stat-value">${formatLargeNum(h.shares)}</span>
+                        </div>
+                        <div class="holder-stat">
+                            <span class="holder-stat-label">% Out</span>
+                            <span class="holder-stat-value">${h.pct_out}%</span>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        } else {
+            holdersEl.innerHTML = '<div class="holder-placeholder">No institutional holder data available</div>';
+        }
+    }
+
+    // ========== ANALYSTS TAB ==========
+    // Recommendation with color
+    const recEl = document.getElementById('modalRecommendation');
+    if (recEl) {
+        if (data.recommendation && data.recommendation !== 'N/A') {
+            const recMap = {
+                'strong_buy': { text: 'Strong Buy', color: '#00c853' },
+                'buy': { text: 'Buy', color: '#4caf50' },
+                'hold': { text: 'Hold', color: '#ffc107' },
+                'sell': { text: 'Sell', color: '#ff5722' },
+                'strong_sell': { text: 'Strong Sell', color: '#f44336' }
+            };
+            const rec = recMap[data.recommendation] || { text: data.recommendation, color: '#888' };
+            recEl.textContent = rec.text;
+            recEl.style.color = rec.color;
+        } else {
+            recEl.textContent = 'N/A';
+            recEl.style.color = '';
+        }
+    }
+
+    setText('modalNumAnalysts', data.num_analysts);
+    setText('modalTargetPrice', data.target_price, '$');
+    setText('modalTargetHigh', data.target_high, '$');
+    setText('modalTargetLow', data.target_low, '$');
+
+    // Calculate upside
+    const upsideEl = document.getElementById('modalUpside');
+    if (upsideEl && data.target_price && data.target_price !== 'N/A' && data.price) {
+        const upside = ((data.target_price - data.price) / data.price * 100).toFixed(1);
+        upsideEl.textContent = `${upside >= 0 ? '+' : ''}${upside}%`;
+        upsideEl.style.color = upside >= 0 ? '#00c853' : '#ff5252';
+    } else if (upsideEl) {
+        upsideEl.textContent = 'N/A';
+        upsideEl.style.color = '';
+    }
+
+    // ========== COMPANY INFO ==========
+    setText('modalExchange', data.exchange);
+    setText('modalSector', data.sector);
+    setText('modalIndustry', data.industry);
+    setText('modalHQ', data.headquarters);
+    setText('modalEmployees', data.employees ? formatNumber(data.employees) : 'N/A');
+
     // Update description
     document.getElementById('modalDescription').textContent = data.description || 'No description available.';
-    
+
     // Update external links
     const websiteLink = document.getElementById('modalWebsite');
-    if (data.website) {
-        websiteLink.href = data.website;
-        websiteLink.style.display = 'flex';
-    } else {
-        websiteLink.style.display = 'none';
+    if (websiteLink) {
+        if (data.website) {
+            websiteLink.href = data.website;
+            websiteLink.style.display = 'flex';
+        } else {
+            websiteLink.style.display = 'none';
+        }
     }
-    
-    document.getElementById('modalYahooLink').href = `https://finance.yahoo.com/quote/${data.ticker}`;
-    document.getElementById('modalSECLink').href = `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${data.ticker}&type=&dateb=&owner=include&count=40`;
+
+    const yahooLink = document.getElementById('modalYahooLink');
+    if (yahooLink) {
+        yahooLink.href = `https://finance.yahoo.com/quote/${data.ticker}`;
+    }
+
+    const secLink = document.getElementById('modalSECLink');
+    if (secLink) {
+        secLink.href = `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${data.ticker}&type=&dateb=&owner=include&count=40`;
+    }
 }
 
 /**
- * Load and render stock chart
+ * Switch between stock modal tabs with lazy loading
+ * Only loads tab data when the tab is clicked for the first time
+ */
+function switchStockTab(tabName) {
+    // Update tab buttons
+    document.querySelectorAll('.stock-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.tab === tabName);
+    });
+
+    // Update tab content
+    document.querySelectorAll('.stock-tab-content').forEach(content => {
+        content.classList.toggle('active', content.id === `tab-${tabName}`);
+    });
+
+    // Lazy load tab data if not already loaded
+    if (!tabLoadState[tabName] && currentStockData) {
+        lazyLoadTabData(tabName, currentStockData);
+    }
+}
+
+/**
+ * Lazy load data for a specific tab
+ */
+async function lazyLoadTabData(tabName, data) {
+    console.log(`[LazyLoad] Loading data for tab: ${tabName}`);
+
+    const tabContent = document.getElementById(`tab-${tabName}`);
+    if (!tabContent) return;
+
+    // Show loading spinner in the tab
+    const existingSpinner = tabContent.querySelector('.tab-loading-spinner');
+    if (!existingSpinner && !tabLoadState[tabName]) {
+        const spinner = document.createElement('div');
+        spinner.className = 'tab-loading-spinner';
+        spinner.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading...';
+        spinner.style.cssText = 'text-align: center; padding: 20px; color: #888;';
+        tabContent.insertBefore(spinner, tabContent.firstChild);
+    }
+
+    try {
+        switch (tabName) {
+            case 'news':
+                // Load news lazily
+                if (!tabLoadState.news && currentModalTicker) {
+                    await loadRelatedNews(currentModalTicker);
+                }
+                break;
+
+            case 'insiders':
+                // Load insider transactions lazily
+                if (!tabLoadState.insiders && currentModalTicker) {
+                    await loadInsiderTransactions(currentModalTicker);
+                }
+                break;
+
+            case 'valuation':
+            case 'financials':
+            case 'ownership':
+            case 'analysts':
+                // These tabs use data already fetched, just mark as loaded
+                // The populateModalData already fills these
+                break;
+        }
+
+        tabLoadState[tabName] = true;
+    } catch (error) {
+        console.error(`[LazyLoad] Error loading ${tabName} tab:`, error);
+    } finally {
+        // Remove spinner
+        const spinner = tabContent.querySelector('.tab-loading-spinner');
+        if (spinner) spinner.remove();
+    }
+}
+
+// Make switchStockTab globally available
+window.switchStockTab = switchStockTab;
+
+/**
+ * Load and render stock chart with technical indicators
  */
 async function loadAndRenderChart(ticker, period) {
     try {
@@ -3336,19 +4342,31 @@ async function loadAndRenderChart(ticker, period) {
             '5y': '1mo',
             'max': '3mo'
         };
-        
+
         const interval = intervalMap[period] || '1d';
-        
+
         const response = await fetchWithTimeout(`/api/stock/${ticker}/chart?period=${period}&interval=${interval}`);
         const data = await response.json();
-        
+
         if (data.error) {
             console.error('[StockModal] Chart error:', data.error);
             return;
         }
-        
-        renderStockChart(data.data, period);
-        
+
+        // Store chart data for re-rendering
+        currentChartData = data;
+
+        // Render main chart
+        renderStockChart(data, period, currentChartType);
+
+        // Render indicator charts if active
+        if (activeIndicators.rsi) {
+            renderRSIChart(data, period);
+        }
+        if (activeIndicators.macd) {
+            renderMACDChart(data, period);
+        }
+
     } catch (error) {
         console.error('[StockModal] Error loading chart:', error);
     }
@@ -3356,22 +4374,24 @@ async function loadAndRenderChart(ticker, period) {
 
 /**
  * Render the stock chart using Chart.js
+ * Supports line and candlestick chart types with Bollinger Bands overlay
  */
-function renderStockChart(data, period) {
+function renderStockChart(data, period, chartType = 'line') {
     const ctx = document.getElementById('stockChart');
     if (!ctx) return;
-    
+
     // Destroy existing chart
     if (stockChartInstance) {
         stockChartInstance.destroy();
     }
-    
-    if (!data || data.length === 0) {
+
+    const ohlcData = data.data || data;
+    if (!ohlcData || ohlcData.length === 0) {
         return;
     }
-    
+
     // Format dates based on period
-    const labels = data.map(d => {
+    const labels = ohlcData.map(d => {
         const date = new Date(d.date);
         if (period === '1d') {
             return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
@@ -3381,33 +4401,97 @@ function renderStockChart(data, period) {
             return date.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
         }
     });
-    
-    const prices = data.map(d => d.close);
-    
+
+    const prices = ohlcData.map(d => d.close);
+
     // Determine color based on price trend
     const startPrice = prices[0];
     const endPrice = prices[prices.length - 1];
     const isUp = endPrice >= startPrice;
     const color = isUp ? '#00c851' : '#ff4444';
-    
+
+    // Build datasets
+    const datasets = [];
+
+    if (chartType === 'candlestick') {
+        // Create candlestick-style visualization using bars
+        const candleColors = ohlcData.map(d => d.close >= d.open ? '#00c851' : '#ff4444');
+        const candleBorders = ohlcData.map(d => d.close >= d.open ? '#00a040' : '#cc3333');
+
+        datasets.push({
+            label: 'Price',
+            data: prices,
+            backgroundColor: candleColors,
+            borderColor: candleBorders,
+            borderWidth: 1,
+            type: 'bar',
+            barPercentage: 0.6,
+            categoryPercentage: 0.8
+        });
+    } else {
+        // Line chart
+        datasets.push({
+            label: 'Price',
+            data: prices,
+            borderColor: color,
+            backgroundColor: isUp ? 'rgba(0, 200, 81, 0.1)' : 'rgba(255, 68, 68, 0.1)',
+            borderWidth: 2,
+            fill: true,
+            tension: 0.4,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            pointHoverBackgroundColor: color,
+            pointHoverBorderColor: '#fff',
+            pointHoverBorderWidth: 2
+        });
+    }
+
+    // Add Bollinger Bands if active
+    if (activeIndicators.bollinger && data.bollinger) {
+        const bb = data.bollinger;
+
+        datasets.push({
+            label: 'BB Upper',
+            data: bb.upper,
+            borderColor: 'rgba(59, 130, 246, 0.6)',
+            borderWidth: 1,
+            borderDash: [5, 5],
+            fill: false,
+            pointRadius: 0,
+            tension: 0.4,
+            type: 'line'
+        });
+
+        datasets.push({
+            label: 'BB Middle',
+            data: bb.middle,
+            borderColor: 'rgba(59, 130, 246, 0.4)',
+            borderWidth: 1,
+            fill: false,
+            pointRadius: 0,
+            tension: 0.4,
+            type: 'line'
+        });
+
+        datasets.push({
+            label: 'BB Lower',
+            data: bb.lower,
+            borderColor: 'rgba(59, 130, 246, 0.6)',
+            borderWidth: 1,
+            borderDash: [5, 5],
+            fill: '-1',
+            backgroundColor: 'rgba(59, 130, 246, 0.05)',
+            pointRadius: 0,
+            tension: 0.4,
+            type: 'line'
+        });
+    }
+
     stockChartInstance = new Chart(ctx, {
-        type: 'line',
+        type: chartType === 'candlestick' ? 'bar' : 'line',
         data: {
             labels: labels,
-            datasets: [{
-                label: 'Price',
-                data: prices,
-                borderColor: color,
-                backgroundColor: isUp ? 'rgba(0, 200, 81, 0.1)' : 'rgba(255, 68, 68, 0.1)',
-                borderWidth: 2,
-                fill: true,
-                tension: 0.4,
-                pointRadius: 0,
-                pointHoverRadius: 4,
-                pointHoverBackgroundColor: color,
-                pointHoverBorderColor: '#fff',
-                pointHoverBorderWidth: 2
-            }]
+            datasets: datasets
         },
         options: {
             responsive: true,
@@ -3429,7 +4513,20 @@ function renderStockChart(data, period) {
                     displayColors: false,
                     callbacks: {
                         label: function(context) {
-                            return `$${context.parsed.y.toFixed(2)}`;
+                            const idx = context.dataIndex;
+                            const d = ohlcData[idx];
+                            if (chartType === 'candlestick' && context.dataset.label === 'Price') {
+                                return [
+                                    `O: $${d.open.toFixed(2)}`,
+                                    `H: $${d.high.toFixed(2)}`,
+                                    `L: $${d.low.toFixed(2)}`,
+                                    `C: $${d.close.toFixed(2)}`
+                                ];
+                            }
+                            if (context.dataset.label.startsWith('BB')) {
+                                return `${context.dataset.label}: $${context.parsed.y?.toFixed(2) || '--'}`;
+                            }
+                            return `$${context.parsed.y?.toFixed(2) || '--'}`;
                         }
                     }
                 }
@@ -3471,6 +4568,243 @@ function renderStockChart(data, period) {
             }
         }
     });
+}
+
+/**
+ * Render RSI indicator chart
+ */
+function renderRSIChart(data, period) {
+    const ctx = document.getElementById('rsiChart');
+    if (!ctx) return;
+
+    if (rsiChartInstance) {
+        rsiChartInstance.destroy();
+    }
+
+    const ohlcData = data.data;
+    const rsiData = data.rsi;
+
+    if (!rsiData || rsiData.length === 0) return;
+
+    const labels = ohlcData.map(d => {
+        const date = new Date(d.date);
+        if (period === '1d') {
+            return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+        } else if (period === '5d' || period === '1mo') {
+            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        } else {
+            return date.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+        }
+    });
+
+    const lastRSI = rsiData.filter(v => v !== null).pop();
+    const rsiValueEl = document.getElementById('rsiValue');
+    if (rsiValueEl && lastRSI !== undefined) {
+        rsiValueEl.textContent = lastRSI.toFixed(1);
+        rsiValueEl.className = 'indicator-value';
+        if (lastRSI >= 70) rsiValueEl.classList.add('overbought');
+        else if (lastRSI <= 30) rsiValueEl.classList.add('oversold');
+        else rsiValueEl.classList.add('neutral');
+    }
+
+    rsiChartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'RSI',
+                data: rsiData,
+                borderColor: '#8b5cf6',
+                backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                borderWidth: 1.5,
+                fill: true,
+                tension: 0.4,
+                pointRadius: 0
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                    titleColor: '#8b5cf6',
+                    bodyColor: '#e0e0e0',
+                    displayColors: false,
+                    callbacks: { label: (ctx) => `RSI: ${ctx.parsed.y?.toFixed(1) || '--'}` }
+                }
+            },
+            scales: {
+                x: { display: false },
+                y: {
+                    display: true,
+                    position: 'right',
+                    min: 0,
+                    max: 100,
+                    grid: { color: 'rgba(255, 255, 255, 0.05)', drawBorder: false },
+                    ticks: { color: '#888', font: { size: 9, family: "'Courier New', monospace" }, stepSize: 30 }
+                }
+            }
+        }
+    });
+}
+
+/**
+ * Render MACD indicator chart
+ */
+function renderMACDChart(data, period) {
+    const ctx = document.getElementById('macdChart');
+    if (!ctx) return;
+
+    if (macdChartInstance) {
+        macdChartInstance.destroy();
+    }
+
+    const ohlcData = data.data;
+    const macdData = data.macd;
+
+    if (!macdData || !macdData.macd) return;
+
+    const labels = ohlcData.map(d => {
+        const date = new Date(d.date);
+        if (period === '1d') {
+            return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+        } else if (period === '5d' || period === '1mo') {
+            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        } else {
+            return date.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+        }
+    });
+
+    const lastMACD = macdData.macd.filter(v => v !== null).pop();
+    const macdValueEl = document.getElementById('macdValue');
+    if (macdValueEl && lastMACD !== undefined) {
+        macdValueEl.textContent = lastMACD.toFixed(2);
+    }
+
+    const histogramColors = macdData.histogram.map(v => {
+        if (v === null) return 'transparent';
+        return v >= 0 ? 'rgba(16, 185, 129, 0.7)' : 'rgba(239, 68, 68, 0.7)';
+    });
+
+    macdChartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Histogram',
+                    data: macdData.histogram,
+                    backgroundColor: histogramColors,
+                    borderWidth: 0,
+                    barPercentage: 0.8,
+                    categoryPercentage: 1.0,
+                    order: 2
+                },
+                {
+                    label: 'MACD',
+                    data: macdData.macd,
+                    type: 'line',
+                    borderColor: '#10b981',
+                    borderWidth: 1.5,
+                    fill: false,
+                    tension: 0.4,
+                    pointRadius: 0,
+                    order: 1
+                },
+                {
+                    label: 'Signal',
+                    data: macdData.signal,
+                    type: 'line',
+                    borderColor: '#f59e0b',
+                    borderWidth: 1.5,
+                    fill: false,
+                    tension: 0.4,
+                    pointRadius: 0,
+                    order: 1
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                    titleColor: '#10b981',
+                    bodyColor: '#e0e0e0',
+                    displayColors: true,
+                    callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y?.toFixed(4) || '--'}` }
+                }
+            },
+            scales: {
+                x: { display: false },
+                y: {
+                    display: true,
+                    position: 'right',
+                    grid: { color: 'rgba(255, 255, 255, 0.05)', drawBorder: false },
+                    ticks: { color: '#888', font: { size: 9, family: "'Courier New', monospace" }, callback: (v) => v.toFixed(2) }
+                }
+            }
+        }
+    });
+}
+
+/**
+ * Change chart type (line or candlestick)
+ */
+function changeChartType(type) {
+    currentChartType = type;
+    document.querySelectorAll('.chart-type-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.type === type);
+    });
+    if (currentChartData) {
+        renderStockChart(currentChartData, currentChartPeriod, type);
+    }
+}
+
+/**
+ * Toggle technical indicator
+ */
+function toggleIndicator(indicator) {
+    activeIndicators[indicator] = !activeIndicators[indicator];
+
+    const btn = document.querySelector(`.indicator-toggle-btn[data-indicator="${indicator}"]`);
+    if (btn) {
+        btn.classList.toggle('active', activeIndicators[indicator]);
+    }
+
+    if (indicator === 'rsi') {
+        const panel = document.getElementById('rsiPanel');
+        if (panel) {
+            panel.style.display = activeIndicators.rsi ? 'block' : 'none';
+            if (activeIndicators.rsi && currentChartData) {
+                renderRSIChart(currentChartData, currentChartPeriod);
+            } else if (rsiChartInstance) {
+                rsiChartInstance.destroy();
+                rsiChartInstance = null;
+            }
+        }
+    } else if (indicator === 'macd') {
+        const panel = document.getElementById('macdPanel');
+        if (panel) {
+            panel.style.display = activeIndicators.macd ? 'block' : 'none';
+            if (activeIndicators.macd && currentChartData) {
+                renderMACDChart(currentChartData, currentChartPeriod);
+            } else if (macdChartInstance) {
+                macdChartInstance.destroy();
+                macdChartInstance = null;
+            }
+        }
+    } else if (indicator === 'bollinger') {
+        if (currentChartData) {
+            renderStockChart(currentChartData, currentChartPeriod, currentChartType);
+        }
+    }
 }
 
 /**
@@ -3616,6 +4950,8 @@ highlightTickers = highlightTickersClickable;
 window.openStockModal = openStockModal;
 window.closeStockModal = closeStockModal;
 window.changeChartPeriod = changeChartPeriod;
+window.changeChartType = changeChartType;
+window.toggleIndicator = toggleIndicator;
 
 // ============================================================================
 // Keyboard shortcuts for modal
@@ -4253,7 +5589,7 @@ function updateSuggestionSelection(suggestions, index) {
 }
 
 // Perform search
-let searchDebounceTimer = null;
+// Note: searchDebounceTimer already declared at top of file
 
 function performSearch() {
     clearTimeout(searchDebounceTimer);
@@ -4540,3 +5876,565 @@ document.addEventListener('DOMContentLoaded', initSearch);
 // Make functions globally accessible
 window.openSearchOverlay = openSearchOverlay;
 window.closeSearchOverlay = closeSearchOverlay;
+
+// =============================================================================
+// Insider Trading Functions
+// =============================================================================
+
+/**
+ * Load and display insider trading data for a stock
+ */
+async function loadInsiderTransactions(ticker) {
+    const container = document.getElementById('modalInsiderTransactions');
+    if (!container) return;
+
+    container.innerHTML = '<div class="insider-placeholder"><i class="fas fa-spinner fa-spin"></i> Loading insider transactions...</div>';
+
+    try {
+        const response = await fetchWithTimeout(`/api/stock/${ticker}/insiders`);
+        const data = await response.json();
+
+        if (data.error) {
+            container.innerHTML = `<div class="insider-placeholder">${data.error}</div>`;
+            return;
+        }
+
+        if (!data.transactions || data.transactions.length === 0) {
+            container.innerHTML = '<div class="insider-placeholder">No recent insider transactions found</div>';
+            return;
+        }
+
+        // Build table header
+        let html = `
+            <div class="insider-header">
+                <span>Date</span>
+                <span>Insider</span>
+                <span>Type</span>
+                <span>Shares</span>
+                <span>Value</span>
+            </div>
+        `;
+
+        // Build transaction rows
+        html += data.transactions.map(trans => {
+            const typeClass = trans.transaction_type.toLowerCase().includes('buy') ? 'buy' :
+                              trans.transaction_type.toLowerCase().includes('sell') ? 'sell' :
+                              trans.transaction_type.toLowerCase().includes('exercise') ? 'exercise' : 'gift';
+
+            const formattedValue = trans.value ? `$${formatLargeNumber(trans.value)}` : 'N/A';
+            const formattedShares = trans.shares ? formatLargeNumber(trans.shares) : 'N/A';
+
+            return `
+                <div class="insider-transaction">
+                    <span class="insider-date">${trans.date}</span>
+                    <div class="insider-info">
+                        <span class="insider-name">${trans.insider}</span>
+                        <span class="insider-title">${trans.title}</span>
+                    </div>
+                    <span class="insider-type ${typeClass}">${trans.transaction_type}</span>
+                    <span class="insider-shares">${formattedShares}</span>
+                    <span class="insider-value">${formattedValue}</span>
+                </div>
+            `;
+        }).join('');
+
+        container.innerHTML = html;
+
+    } catch (error) {
+        console.error('Error loading insider transactions:', error);
+        container.innerHTML = '<div class="insider-placeholder">Failed to load insider transactions</div>';
+    }
+}
+
+/**
+ * Format large numbers with K, M, B suffixes
+ */
+function formatLargeNumber(num) {
+    if (!num || isNaN(num)) return '0';
+    const absNum = Math.abs(num);
+    if (absNum >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+    if (absNum >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+    if (absNum >= 1e3) return (num / 1e3).toFixed(1) + 'K';
+    return num.toLocaleString();
+}
+
+// =============================================================================
+// Trending Tickers Functions
+// =============================================================================
+
+/**
+ * Load and display trending tickers
+ */
+async function loadTrendingTickers() {
+    const container = document.getElementById('trendingTickersList');
+    if (!container) return;
+
+    try {
+        const response = await fetchWithTimeout('/api/trending-tickers?hours=24&limit=8&min_mentions=1');
+        const data = await response.json();
+
+        if (!data.tickers || data.tickers.length === 0) {
+            container.innerHTML = '<div class="empty-state">No trending tickers</div>';
+            return;
+        }
+
+        container.innerHTML = data.tickers.map((ticker, idx) => `
+            <div class="trending-ticker-item" onclick="openStockModal('${ticker.ticker}')">
+                <div class="trending-ticker-info">
+                    <span class="trending-ticker-rank ${idx < 3 ? 'top' : ''}">${idx + 1}</span>
+                    <span class="trending-ticker-symbol">${ticker.ticker}</span>
+                </div>
+                <div class="trending-ticker-stats">
+                    <span class="trending-ticker-mentions">${ticker.mentions} mentions</span>
+                    <span class="trending-ticker-sentiment ${ticker.sentiment_label}">${ticker.sentiment_label.toUpperCase()}</span>
+                </div>
+            </div>
+        `).join('');
+
+    } catch (error) {
+        console.error('Error loading trending tickers:', error);
+        container.innerHTML = '<div class="empty-state">Error loading data</div>';
+    }
+}
+
+// =============================================================================
+// Sentiment Trend Functions
+// =============================================================================
+
+/**
+ * Load and display sentiment trend mini-chart
+ */
+async function loadSentimentTrend() {
+    const barsContainer = document.getElementById('sentimentBars');
+    const summaryContainer = document.getElementById('sentimentSummary');
+    if (!barsContainer) return;
+
+    try {
+        const response = await fetchWithTimeout('/api/sentiment/trends?hours=48&interval=6h');
+        const data = await response.json();
+
+        if (!data.trends || data.trends.length === 0) {
+            barsContainer.innerHTML = '<div class="empty-state">No data</div>';
+            return;
+        }
+
+        // Find max total for scaling
+        const maxTotal = Math.max(...data.trends.map(t => t.total), 1);
+
+        // Build bar chart
+        const barsHtml = data.trends.slice(-12).map(t => {
+            const total = t.total || 1;
+            const posHeight = (t.positive / total) * 100;
+            const neutralHeight = (t.neutral / total) * 100;
+            const negHeight = (t.negative / total) * 100;
+            const barHeight = (total / maxTotal) * 40;
+
+            return `
+                <div class="sentiment-bar" title="${t.time}">
+                    <div class="sentiment-bar-segment positive" style="height: ${posHeight * barHeight / 100}px"></div>
+                    <div class="sentiment-bar-segment neutral" style="height: ${neutralHeight * barHeight / 100}px"></div>
+                    <div class="sentiment-bar-segment negative" style="height: ${negHeight * barHeight / 100}px"></div>
+                </div>
+            `;
+        }).join('');
+
+        barsContainer.innerHTML = barsHtml;
+
+        // Update summary
+        if (summaryContainer && data.summary) {
+            const mood = data.summary.overall_sentiment || 'neutral';
+            const moodLabel = mood === 'bullish' ? 'BULLISH' : mood === 'bearish' ? 'BEARISH' : 'NEUTRAL';
+
+            summaryContainer.innerHTML = `
+                <span class="sentiment-label ${mood}">${moodLabel}</span>
+                <div class="sentiment-counts">
+                    <span class="sentiment-count"><span class="dot positive"></span>${data.summary.positive}</span>
+                    <span class="sentiment-count"><span class="dot neutral"></span>${data.summary.neutral}</span>
+                    <span class="sentiment-count"><span class="dot negative"></span>${data.summary.negative}</span>
+                </div>
+            `;
+        }
+
+    } catch (error) {
+        console.error('Error loading sentiment trend:', error);
+        barsContainer.innerHTML = '<div class="empty-state">Error</div>';
+    }
+}
+
+// =============================================================================
+// Sentiment Filter Functions
+// =============================================================================
+
+/**
+ * Setup sentiment filter buttons for articles list
+ */
+function setupSentimentFilters() {
+    const filterBtns = document.querySelectorAll('.sentiment-filter-btn');
+    if (!filterBtns.length) return;
+
+    filterBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            // Update active state
+            filterBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            // Apply filter
+            const sentiment = btn.dataset.sentiment;
+            if (sentiment === 'all') {
+                articlesState.filters.sentiment = null;
+            } else {
+                articlesState.filters.sentiment = sentiment;
+            }
+
+            // Reload articles with filter
+            articlesState.offset = 0;
+            articlesState.articles = [];
+            articlesState.hasMore = true;
+            document.getElementById('articlesList').innerHTML = '';
+            loadMoreArticles();
+        });
+    });
+}
+
+// Initialize new features on DOM ready
+document.addEventListener('DOMContentLoaded', () => {
+    // Load trending tickers and sentiment trend on startup
+    setTimeout(() => {
+        loadTrendingTickers();
+        loadSentimentTrend();
+        setupSentimentFilters();
+    }, 500);
+
+    // Refresh periodically
+    setInterval(() => {
+        loadTrendingTickers();
+        loadSentimentTrend();
+    }, 120000); // Every 2 minutes
+});
+
+// Make functions globally accessible
+window.loadInsiderTransactions = loadInsiderTransactions;
+window.loadTrendingTickers = loadTrendingTickers;
+window.loadSentimentTrend = loadSentimentTrend;
+
+// =============================================================================
+// Stock Comparison Feature
+// =============================================================================
+
+let comparisonTickers = [];
+let compareChartInstance = null;
+
+function openCompareModal() {
+    const modal = document.getElementById('compareModal');
+    if (modal) {
+        modal.style.display = 'flex';
+        document.getElementById('compareTickerInput').focus();
+    }
+}
+
+function closeCompareModal() {
+    const modal = document.getElementById('compareModal');
+    if (modal) {
+        modal.style.display = 'none';
+    }
+    comparisonTickers = [];
+    updateCompareTickerList();
+    document.getElementById('compareResults').style.display = 'none';
+    document.getElementById('compareLoading').style.display = 'none';
+    if (compareChartInstance) {
+        compareChartInstance.destroy();
+        compareChartInstance = null;
+    }
+}
+
+function handleCompareTickerKeypress(event) {
+    if (event.key === 'Enter') {
+        addComparisonTicker();
+    }
+}
+
+function addComparisonTicker() {
+    const input = document.getElementById('compareTickerInput');
+    const ticker = input.value.trim().toUpperCase();
+    if (!ticker) return;
+    if (!/^[A-Z]{1,5}$/.test(ticker)) {
+        showToast('Invalid ticker format', 'error');
+        return;
+    }
+    if (comparisonTickers.includes(ticker)) {
+        showToast(`${ticker} already added`, 'warning');
+        input.value = '';
+        return;
+    }
+    if (comparisonTickers.length >= 4) {
+        showToast('Maximum 4 tickers allowed', 'warning');
+        return;
+    }
+    comparisonTickers.push(ticker);
+    updateCompareTickerList();
+    input.value = '';
+    input.focus();
+}
+
+function removeComparisonTicker(ticker) {
+    comparisonTickers = comparisonTickers.filter(t => t !== ticker);
+    updateCompareTickerList();
+}
+
+function updateCompareTickerList() {
+    const container = document.getElementById('compareTickerList');
+    if (!container) return;
+    container.innerHTML = comparisonTickers.map(ticker => `
+        <span class="compare-ticker-tag">
+            ${ticker}
+            <span class="remove" onclick="removeComparisonTicker('${ticker}')">&times;</span>
+        </span>
+    `).join('');
+}
+
+function refreshComparison() {
+    if (comparisonTickers.length >= 2) {
+        runComparison();
+    }
+}
+
+async function runComparison() {
+    if (comparisonTickers.length < 2) {
+        showToast('Add at least 2 tickers to compare', 'warning');
+        return;
+    }
+    const period = document.getElementById('comparePeriod').value;
+    const loading = document.getElementById('compareLoading');
+    const results = document.getElementById('compareResults');
+    loading.style.display = 'block';
+    results.style.display = 'none';
+    try {
+        const response = await fetchWithTimeout(`/api/compare?tickers=${comparisonTickers.join(',')}&period=${period}`);
+        const data = await response.json();
+        if (data.error) {
+            showToast(data.error, 'error');
+            loading.style.display = 'none';
+            return;
+        }
+        renderComparisonChart(data);
+        renderComparisonMetrics(data);
+        loading.style.display = 'none';
+        results.style.display = 'flex';
+    } catch (error) {
+        console.error('Error running comparison:', error);
+        showToast('Failed to load comparison data', 'error');
+        loading.style.display = 'none';
+    }
+}
+
+function renderComparisonChart(data) {
+    const ctx = document.getElementById('compareChart');
+    if (!ctx) return;
+    if (compareChartInstance) {
+        compareChartInstance.destroy();
+    }
+    const colors = ['#ff9f1c', '#3b82f6', '#10b981', '#8b5cf6'];
+    const datasets = [];
+    Object.entries(data.chart_data).forEach(([ticker, chartData], index) => {
+        if (chartData && chartData.length > 0) {
+            datasets.push({
+                label: ticker,
+                data: chartData.map(d => ({ x: d.date, y: d.percent_change })),
+                borderColor: colors[index % colors.length],
+                backgroundColor: colors[index % colors.length] + '20',
+                borderWidth: 2,
+                fill: false,
+                tension: 0.3,
+                pointRadius: 0,
+                pointHoverRadius: 4
+            });
+        }
+    });
+    const allDates = [...new Set(Object.values(data.chart_data).flat().map(d => d.date))].sort();
+    compareChartInstance = new Chart(ctx, {
+        type: 'line',
+        data: { labels: allDates, datasets: datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            plugins: {
+                legend: { position: 'top', labels: { color: '#94a3b8', usePointStyle: true, padding: 20 } },
+                tooltip: {
+                    backgroundColor: '#1e293b',
+                    titleColor: '#f8fafc',
+                    bodyColor: '#94a3b8',
+                    borderColor: '#334155',
+                    borderWidth: 1,
+                    callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)}%` }
+                }
+            },
+            scales: {
+                x: { grid: { color: '#334155' }, ticks: { color: '#94a3b8', maxRotation: 0, maxTicksLimit: 10 } },
+                y: { grid: { color: '#334155' }, ticks: { color: '#94a3b8', callback: v => v.toFixed(1) + '%' } }
+            }
+        }
+    });
+}
+
+function renderComparisonMetrics(data) {
+    const headerRow = document.getElementById('compareMetricsHeader');
+    const tbody = document.getElementById('compareMetricsBody');
+    if (!headerRow || !tbody) return;
+    const tickers = Object.keys(data.stocks);
+    headerRow.innerHTML = '<th>Metric</th>' + tickers.map(t => `<th>${t}</th>`).join('');
+    const metrics = [
+        { key: 'name', label: 'Company' },
+        { key: 'price', label: 'Price', format: v => `$${v}` },
+        { key: 'change_percent', label: 'Change %', format: v => `${v >= 0 ? '+' : ''}${v}%`, colorize: true },
+        { key: 'market_cap', label: 'Market Cap' },
+        { key: 'pe_ratio', label: 'P/E Ratio' },
+        { key: 'forward_pe', label: 'Forward P/E' },
+        { key: 'peg_ratio', label: 'PEG Ratio' },
+        { key: 'eps', label: 'EPS' },
+        { key: 'dividend_yield', label: 'Div Yield', format: v => v ? `${v}%` : 'N/A' },
+        { key: 'beta', label: 'Beta' },
+        { key: '52_week_high', label: '52W High', format: v => typeof v === 'number' ? `$${v}` : v },
+        { key: '52_week_low', label: '52W Low', format: v => typeof v === 'number' ? `$${v}` : v },
+        { key: 'profit_margin', label: 'Profit Margin', format: v => v !== 'N/A' ? `${v}%` : v },
+        { key: 'roe', label: 'ROE', format: v => v !== 'N/A' ? `${v}%` : v },
+        { key: 'debt_to_equity', label: 'Debt/Equity' },
+        { key: 'sector', label: 'Sector' },
+        { key: 'industry', label: 'Industry' }
+    ];
+    tbody.innerHTML = metrics.map(metric => {
+        const cells = tickers.map(ticker => {
+            const stock = data.stocks[ticker];
+            if (!stock || stock.error) return '<td>--</td>';
+            let value = stock[metric.key];
+            if (value === undefined || value === null) value = 'N/A';
+            if (metric.format && value !== 'N/A') value = metric.format(value);
+            let className = '';
+            if (metric.colorize && typeof stock[metric.key] === 'number') {
+                className = stock[metric.key] >= 0 ? 'positive' : 'negative';
+            }
+            return `<td class="${className}">${value}</td>`;
+        }).join('');
+        return `<tr><td>${metric.label}</td>${cells}</tr>`;
+    }).join('');
+}
+
+window.openCompareModal = openCompareModal;
+window.closeCompareModal = closeCompareModal;
+window.handleCompareTickerKeypress = handleCompareTickerKeypress;
+window.addComparisonTicker = addComparisonTicker;
+window.removeComparisonTicker = removeComparisonTicker;
+window.refreshComparison = refreshComparison;
+window.runComparison = runComparison;
+
+// =============================================================================
+// Options Chain Feature
+// =============================================================================
+
+let currentOptionsData = null;
+
+async function loadOptionsExpirations(ticker) {
+    const select = document.getElementById('optionsExpiration');
+    if (!select) return;
+    select.innerHTML = '<option value="">Loading...</option>';
+    try {
+        const response = await fetchWithTimeout(`/api/stock/${ticker}/options`);
+        const data = await response.json();
+        if (data.error && !data.expirations) {
+            select.innerHTML = '<option value="">No options available</option>';
+            return;
+        }
+        const expirations = data.expirations || [];
+        select.innerHTML = '<option value="">Select expiration...</option>' +
+            expirations.map(exp => `<option value="${exp}">${exp}</option>`).join('');
+    } catch (error) {
+        console.error('Error loading options expirations:', error);
+        select.innerHTML = '<option value="">Error loading options</option>';
+    }
+}
+
+async function loadOptionsForExpiration() {
+    const select = document.getElementById('optionsExpiration');
+    const expiration = select.value;
+    if (!expiration || !currentModalTicker) return;
+    const loading = document.getElementById('optionsLoading');
+    const content = document.getElementById('optionsContent');
+    const dataContainer = document.getElementById('optionsData');
+    loading.style.display = 'block';
+    content.style.display = 'none';
+    dataContainer.style.display = 'none';
+    try {
+        const response = await fetchWithTimeout(`/api/stock/${currentModalTicker}/options?expiration=${expiration}`);
+        const data = await response.json();
+        if (data.error) {
+            content.innerHTML = `<div class="options-empty"><i class="fas fa-exclamation-circle"></i><p>${data.error}</p></div>`;
+            loading.style.display = 'none';
+            content.style.display = 'block';
+            return;
+        }
+        currentOptionsData = data;
+        renderOptionsChain(data);
+        loading.style.display = 'none';
+        dataContainer.style.display = 'block';
+    } catch (error) {
+        console.error('Error loading options chain:', error);
+        content.innerHTML = '<div class="options-empty"><i class="fas fa-exclamation-circle"></i><p>Failed to load options data</p></div>';
+        loading.style.display = 'none';
+        content.style.display = 'block';
+    }
+}
+
+function renderOptionsChain(data) {
+    const priceEl = document.getElementById('optionsCurrentPrice');
+    if (priceEl) priceEl.innerHTML = `Current Price: <span>$${data.currentPrice}</span>`;
+    const callsBody = document.getElementById('optionsCallsBody');
+    if (callsBody && data.calls) {
+        callsBody.innerHTML = data.calls.map(opt => {
+            const itmClass = opt.inTheMoney ? 'itm' : '';
+            const ivClass = getIVClass(opt.impliedVolatility);
+            return `<tr class="${itmClass}"><td>$${opt.strike}</td><td>$${opt.lastPrice}</td><td>$${opt.bid}</td><td>$${opt.ask}</td><td>${formatCompactNum(opt.volume)}</td><td>${formatCompactNum(opt.openInterest)}</td><td class="${ivClass}">${opt.impliedVolatility}%</td></tr>`;
+        }).join('');
+    }
+    const putsBody = document.getElementById('optionsPutsBody');
+    if (putsBody && data.puts) {
+        putsBody.innerHTML = data.puts.map(opt => {
+            const itmClass = opt.inTheMoney ? 'itm' : '';
+            const ivClass = getIVClass(opt.impliedVolatility);
+            return `<tr class="${itmClass}"><td>$${opt.strike}</td><td>$${opt.lastPrice}</td><td>$${opt.bid}</td><td>$${opt.ask}</td><td>${formatCompactNum(opt.volume)}</td><td>${formatCompactNum(opt.openInterest)}</td><td class="${ivClass}">${opt.impliedVolatility}%</td></tr>`;
+        }).join('');
+    }
+}
+
+function getIVClass(iv) {
+    if (iv > 80) return 'iv-high';
+    if (iv > 40) return 'iv-medium';
+    return 'iv-low';
+}
+
+function formatCompactNum(num) {
+    if (!num) return '0';
+    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+    if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+    return num.toString();
+}
+
+// Hook into stock modal tab switching for options loading
+const originalSwitchStockTabFn = window.switchStockTab;
+window.switchStockTab = function(tabName) {
+    if (typeof originalSwitchStockTabFn === 'function') {
+        originalSwitchStockTabFn(tabName);
+    } else {
+        document.querySelectorAll('.stock-tab').forEach(tab => {
+            tab.classList.toggle('active', tab.dataset.tab === tabName);
+        });
+        document.querySelectorAll('.stock-tab-content').forEach(content => {
+            content.classList.toggle('active', content.id === `tab-${tabName}`);
+        });
+    }
+    if (tabName === 'options' && currentModalTicker) {
+        loadOptionsExpirations(currentModalTicker);
+    }
+};
+
+window.loadOptionsExpirations = loadOptionsExpirations;
+window.loadOptionsForExpiration = loadOptionsForExpiration;
