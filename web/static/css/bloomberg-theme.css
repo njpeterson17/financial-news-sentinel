@@ -5872,7 +5872,7 @@ mark {
     display: flex;
     align-items: center;
     gap: 12px;
-    margin-bottom: 20px;
+    margin-bottom: 12px;
 }
 
 .compare-period-select label {
@@ -5895,7 +5895,7 @@ mark {
 
 .compare-loading {
     text-align: center;
-    padding: 40px;
+    padding: 20px;
     color: var(--text-secondary);
 }
 
@@ -5908,14 +5908,14 @@ mark {
 .compare-results {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 12px;
 }
 
 .compare-chart-container {
     background: var(--bg-secondary);
     border-radius: 8px;
-    padding: 16px;
-    height: 300px;
+    padding: 12px;
+    height: 220px;
 }
 
 .compare-metrics-table-container {
