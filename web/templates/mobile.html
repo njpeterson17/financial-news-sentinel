@@ -18,7 +18,7 @@
     
     <!-- Icons -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💸</text></svg>">
-    <link rel="apple-touch-icon" href="/static/img/icon-192x192.png">
+    <link rel="apple-touch-icon" href="/static/img/icon-192x192.svg">
     
     <title>Nickberg Terminal</title>
     
@@ -6098,7 +6098,7 @@
         async function registerServiceWorker() {
             if (!('serviceWorker' in navigator)) return;
             try {
-                swRegistration = await navigator.serviceWorker.register('/static/sw.js', { scope: '/' });
+                swRegistration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
                 console.log('[SW] Registered:', swRegistration.scope);
                 swRegistration.addEventListener('updatefound', () => {
                     const newWorker = swRegistration.installing;

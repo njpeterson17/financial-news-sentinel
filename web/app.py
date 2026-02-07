@@ -690,6 +690,19 @@ def favicon():
     )
 
 
+@app.route('/sw.js')
+def service_worker():
+    """Serve service worker from root for proper scope"""
+    response = send_from_directory(
+        os.path.join(app.root_path, 'static'),
+        'sw.js',
+        mimetype='application/javascript'
+    )
+    # Allow service worker to control all pages
+    response.headers['Service-Worker-Allowed'] = '/'
+    return response
+
+
 @app.route('/')
 def index():
     """Main dashboard - Bloomberg Terminal Theme
