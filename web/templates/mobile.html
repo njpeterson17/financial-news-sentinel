@@ -4322,7 +4322,7 @@
                 const [statsRes, alertsRes, companiesRes, sentimentRes] = await Promise.all([
                     fetch('/api/stats').catch(() => null),
                     fetch('/api/alerts').catch(() => null),
-                    fetch('/api/top-companies').catch(() => null),
+                    fetch('/api/companies/top').catch(() => null),
                     fetch('/api/sentiment').catch(() => null)
                 ]);
 
