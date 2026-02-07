@@ -1529,17 +1529,21 @@ def get_prices():
         return None
 
     # Fetch uncached prices with timeout
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         future_to_ticker = {executor.submit(get_ticker_price, t): t for t in tickers_to_fetch}
 
-        for future in concurrent.futures.as_completed(future_to_ticker, timeout=3):
-            try:
-                result = future.result(timeout=1)
-                if result:
-                    ticker, data = result
-                    prices[ticker] = data
-            except Exception as e:
-                logger.debug(f"Error fetching price: {e}")
+        try:
+            for future in concurrent.futures.as_completed(future_to_ticker, timeout=5):
+                try:
+                    result = future.result(timeout=2)
+                    if result:
+                        ticker, data = result
+                        prices[ticker] = data
+                except Exception as e:
+                    logger.debug(f"Error fetching price: {e}")
+        except TimeoutError:
+            # Some futures didn't complete in time - return what we have
+            logger.debug(f"Price fetch timeout - {len(prices)} of {len(tickers_to_fetch)} fetched")
 
     return jsonify(prices)
 
