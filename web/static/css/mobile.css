@@ -1,37 +1,37 @@
 /**
  * Nickberg Terminal - Mobile Styles
  * Bloomberg Terminal-inspired mobile-optimized CSS
- * 
- * Design System:
- * - Background: #1a1d21 (dark)
- * - Primary: #ff6b35 (orange accent)
- * - Text: #e8eaed (light gray)
- * - Secondary text: #9aa0a6
- * - Borders: #3c4043
- * - Success: #34a853
- * - Danger: #ea4335
- * - Card background: #2d2f33
+ *
+ * Design System (matching web Bloomberg theme):
+ * - Background: #0a0a0a (true black)
+ * - Primary: #ff6600 (Bloomberg orange)
+ * - Text: #e0e0e0 (light gray)
+ * - Secondary text: #888888
+ * - Borders: #1a1a1a
+ * - Success: #00c851
+ * - Danger: #ff4444
+ * - Card background: #111111
  */
 
 /* ============================================================================
-   CSS CUSTOM PROPERTIES (Mobile-specific)
+   CSS CUSTOM PROPERTIES (Mobile-specific, matching web theme)
    ============================================================================ */
 
 :root {
-  /* Mobile color palette */
-  --mobile-bg: #1a1d21;
-  --mobile-card: #2d2f33;
-  --mobile-card-elevated: #35383c;
-  --mobile-primary: #ff6b35;
-  --mobile-primary-light: #ff8555;
-  --mobile-text: #e8eaed;
-  --mobile-text-secondary: #9aa0a6;
-  --mobile-text-muted: #5f6368;
-  --mobile-border: #3c4043;
-  --mobile-success: #34a853;
-  --mobile-danger: #ea4335;
-  --mobile-warning: #fbbc04;
-  --mobile-info: #4285f4;
+  /* Mobile color palette - Bloomberg theme */
+  --mobile-bg: #0a0a0a;
+  --mobile-card: #111111;
+  --mobile-card-elevated: #1a1a1a;
+  --mobile-primary: #ff6600;
+  --mobile-primary-light: #ff9900;
+  --mobile-text: #e0e0e0;
+  --mobile-text-secondary: #888888;
+  --mobile-text-muted: #555555;
+  --mobile-border: #1a1a1a;
+  --mobile-success: #00c851;
+  --mobile-danger: #ff4444;
+  --mobile-warning: #ffbb33;
+  --mobile-info: #33b5e5;
   
   /* Mobile spacing scale */
   --space-xs: 4px;
