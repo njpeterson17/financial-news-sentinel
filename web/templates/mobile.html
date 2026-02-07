@@ -5066,7 +5066,9 @@
                 const response = await fetch('/api/trending-tickers').catch(() => null);
 
                 if (response?.ok) {
-                    const tickers = await response.json();
+                    const data = await response.json();
+                    // API returns { tickers: [...], count, hours, min_mentions }
+                    const tickers = data.tickers || [];
                     renderTrendingTickers(tickers);
                 } else {
                     // Use sample data for demo
@@ -5108,7 +5110,7 @@
             container.innerHTML = tickers.map(ticker => `
                 <div class="trending-chip" data-ticker="${ticker.ticker}" onclick="handleTickerClick('${ticker.ticker}')">
                     <span class="trending-chip-ticker">$${ticker.ticker}</span>
-                    <span class="trending-chip-sentiment ${ticker.sentiment}"></span>
+                    <span class="trending-chip-sentiment ${ticker.sentiment_label || ticker.sentiment || 'neutral'}"></span>
                     <span class="trending-chip-count">${ticker.mentions}</span>
                 </div>
             `).join('');
