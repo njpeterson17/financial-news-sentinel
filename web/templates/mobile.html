@@ -5992,6 +5992,9 @@
             } catch (e) { return null; }
         }
 
+        function clearOldCache() {
+            const now = Date.now();
+            Object.keys(localStorage).forEach(key => {
                 if (key.startsWith(CACHE_KEY_PREFIX)) {
                     try {
                         const item = JSON.parse(localStorage.getItem(key));
