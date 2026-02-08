@@ -3679,10 +3679,13 @@ def api_trending_tickers():
         return jsonify({'error': 'Failed to get trending tickers'}), 500
 
 
-# Static files
+# Static files with caching headers for performance
 @app.route('/static/<path:path>')
 def send_static(path):
-    return send_from_directory('static', path)
+    response = send_from_directory('static', path)
+    # Cache static assets for 1 day to improve load times
+    response.headers['Cache-Control'] = 'public, max-age=86400'
+    return response
 
 
 # =============================================================================
